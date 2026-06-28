@@ -1,0 +1,14 @@
+# Tandela TR — backend bağımlılıkları (CLAUDE.md §2: FastAPI/Python).
+#
+# Not: bu görevde sadece şu ana kadar gerçekten kullanılan paketler listelenir;
+# FastAPI/SQLAlchemy/Celery/Redis henüz kod tarafında somut olarak
+# kullanılmadığı için buraya eklenmedi (eklenince bu dosya güncellenir).
+
+pydantic>=2.0
+
+# --- Eval / test amaçlı (PRODUCTION DEĞİL — bkz. providers/gemini_provider.py) ---
+# CLAUDE.md §6/§10: somut LLM vendor'ı PRODUCTION için hâlâ TBD; Gemini
+# Developer API burada SADECE golden-set.md eval'i (eval_golden_roles.py)
+# içindir. AB-region/DPA/no-training garantisi YOK — gerçek hasta verisiyle
+# KULLANILMAZ.
+google-genai>=0.3.0

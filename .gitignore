@@ -1,0 +1,25 @@
+# --- Secrets — ASLA commit etme (CLAUDE.md §5: KVKK/veri kuralları) ---
+.env
+*.env
+!.env.example
+*.key
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# --- Node / frontend ---
+node_modules/
+.next/
+dist/
+build/
+
+# --- Editor / OS ---
+.DS_Store
+.vscode/
+.idea/
