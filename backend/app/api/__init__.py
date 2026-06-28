@@ -1,1 +1,1 @@
-# FastAPI routes. Henüz yazılmadı (V1 build sırasında doldurulacak).
+"""FastAPI routes and transcript pipeline API services."""

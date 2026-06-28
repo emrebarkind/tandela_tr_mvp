@@ -12,10 +12,12 @@ __pycache__/
 venv/
 *.egg-info/
 .pytest_cache/
+.tandela_dev.db
 
 # --- Node / frontend ---
 node_modules/
 .next/
+*.tsbuildinfo
 dist/
 build/
 

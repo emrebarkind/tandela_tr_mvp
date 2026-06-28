@@ -2,8 +2,9 @@
 Pipeline aşamaları.
 
 V1'de bu modüldeki fonksiyonların ÇOĞU hâlâ STUB'tır (gerçek ASR/LLM/DB
-çağrısı yapmaz) — ama `assign_roles` artık İSTİSNA: gerçek bir LLM çağrısı
-yapar (vendor TBD, `LLMProvider` arabirimi arkasında — CLAUDE.md §6/§10).
+çağrısı yapmaz) — ama `assign_roles`, `extract_clinical_facts` ve
+`generate_clinical_note` artık İSTİSNA: gerçek bir LLM çağrısı yapar
+(vendor TBD, `LLMProvider` arabirimi arkasında — CLAUDE.md §6/§10).
 Diğer fonksiyonlar doğru TİPTE girdi alır, doğru TİPTE çıktı üretir; içerik
 üretimi yoktur ya da bilinçli olarak en güvenli/en belirsiz değeri döner
 (CLAUDE.md §4.1 — "belirsizse tahmin etme" kuralı stub veriye de uygulanır).
@@ -16,16 +17,17 @@ Somut implementasyon sırası (ilerideki işler, bu görevin kapsamı dışı):
 - preprocess_audio:          gerçek normalizasyon / format dönüşümü
 - transcribe/diarize/align:  AudioProcessingProvider somut adapter'ı (providers/)
 - assign_roles:               BAĞLANDI — prompts/role_assignment.md + LLMProvider
-- extract_clinical_facts:     clinical_facts_extraction LLM prompt'u (henüz stub)
-- generate_clinical_note:     clinical_note_generation LLM prompt'u (henüz stub)
-- extract_procedures:         fact JSON'undan + FDI normalize/doğrulama
-- match_codes_and_checklist:  deterministik TDB DB araması (tdb/) + LLM açıklama katmanı
+- extract_clinical_facts:     BAĞLANDI — prompts/clinical_facts_extraction.md + LLMProvider
+- generate_clinical_note:     BAĞLANDI — prompts/clinical_note_generation.md + LLMProvider
+- extract_procedures:         BAĞLANDI — fact JSON'undan deterministik çıkarım
+- match_codes_and_checklist:  BAĞLANDI — deterministik fixture DB + opsiyonel LLM açıklama katmanı
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from typing import Optional
 
 from app.pipeline.types import (
     AudioRef,
@@ -43,15 +45,21 @@ from app.pipeline.types import (
     FactCategory,
     NoteSentence,
     ProcedureObject,
+    ProcedureStatus,
+    SurfaceCount,
+    CanalCount,
     CodeSuggestionBundle,
 )
 from app.prompts.loader import load_system_prompt
 from app.providers.audio_processing import AudioProcessingProvider
 from app.providers.llm import LLMProvider
+from app.tdb.matching import match_codes_and_checklist as _tdb_match_codes_and_checklist
 
 logger = logging.getLogger(__name__)
 
 ROLE_ASSIGNMENT_PROMPT_FILE = "role_assignment.md"
+CLINICAL_FACTS_PROMPT_FILE = "clinical_facts_extraction.md"
+CLINICAL_NOTE_PROMPT_FILE = "clinical_note_generation.md"
 
 # Fact kategorisi → ClinicalNoteDraft bölümü. 1:1 eşleşme; FactCategory'de
 # bölümsüz kategori yoktur, ClinicalNoteDraft'ta kategorisiz bölüm yoktur.
@@ -364,6 +372,7 @@ def apply_dentist_role_correction(
     role_by_speaker = {a.speaker_id: a.role for a in corrected.assignments}
     utterances = [
         RoleLabelledUtterance(
+            speaker_id=u.speaker_id,
             role=role_by_speaker[u.speaker_id],
             text=u.text,
             start_sec=u.start_sec,
@@ -375,22 +384,223 @@ def apply_dentist_role_correction(
     return RoleLabelledTranscript(session_id=transcript.session_id, utterances=utterances)
 
 
-def extract_clinical_facts(transcript: RoleLabelledTranscript) -> ClinicalFactsBundle:
-    """STUB: gerçek clinical_facts_extraction LLM çağrısı yok.
+def extract_clinical_facts(transcript: RoleLabelledTranscript, llm: LLMProvider) -> ClinicalFactsBundle:
+    """clinical_facts_extraction LLM aşaması — STUB DEĞİL.
 
-    Boş bundle döner — uydurma fact YOK (CLAUDE.md §4.1, §4.6). Gerçek
-    implementasyon prompts/clinical_facts_extraction.md ile değiştirilir.
+    Gerçek bir LLM çağrısı yapılır, ama çıktı sadece beklenen JSON sözleşmesine
+    uyarsa kabul edilir. Parse/sözleşme/provenance hatasında fail-safe:
+    boş fact listesi + hekim inceleme uyarısı. Asla kaynaksız fact üretilmez
+    (CLAUDE.md §4.1, §4.6).
     """
-    return ClinicalFactsBundle(session_id=transcript.session_id, facts=[], uncertain_items=[])
+    system_prompt = load_system_prompt(CLINICAL_FACTS_PROMPT_FILE)
+    user_input = _build_clinical_facts_user_input(transcript)
+
+    try:
+        raw_output = llm.complete(system_prompt, user_input)
+        data = _normalize_clinical_facts_payload(_loads_llm_json_object(raw_output))
+        facts = ClinicalFactsBundle.model_validate(
+            {
+                "session_id": transcript.session_id,
+                "facts": data["facts"],
+                "uncertain_items": data["uncertain_items"],
+            }
+        )
+        _validate_fact_source_quotes(transcript, facts)
+        facts = _normalize_validated_clinical_facts(transcript, facts)
+    except Exception:
+        # KVKK (CLAUDE.md §5): ham LLM çıktısı/transkript metni loga YAZILMAZ
+        # — yalnızca session_id.
+        logger.error(
+            "clinical_facts_llm_output_unparseable: session_id=%s — fail-safe'e düşülüyor.",
+            transcript.session_id,
+        )
+        return _fail_safe_clinical_facts(transcript.session_id)
+
+    return _enforce_source_role_invariant(facts)
 
 
-def generate_clinical_note(facts: ClinicalFactsBundle) -> ClinicalNoteDraft:
-    """STUB: gerçek clinical_note_generation LLM çağrısı yok (içerik üretimi
-    yok), ama YAPISAL kontrat tamdır.
+def _build_clinical_facts_user_input(transcript: RoleLabelledTranscript) -> str:
+    """Prompt dosyasının 'Input format' bölümüyle hizalı kullanıcı girdisi."""
+    utterances_json = json.dumps(
+        [
+            {"speaker_id": u.speaker_id, "role": u.role.value, "text": u.text}
+            for u in transcript.utterances
+        ],
+        ensure_ascii=False,
+    )
+    return f"Transcript (role-labelled):\n{utterances_json}"
+
+
+def _normalize_clinical_facts_payload(data: object) -> dict:
+    """LLM'in küçük alan adı sapmalarını kabul et; klinik içerik uydurma.
+
+    Sözleşme top-level anahtarı `facts`tır. Savunma olarak eski/olası
+    `clinical_facts` ve `extracted_facts` alias'ları da kabul edilir.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("clinical facts payload dict değil")
+
+    facts_field = _first_present(data, ("facts", "clinical_facts", "extracted_facts"))
+    uncertain_items = _first_present(
+        data,
+        ("uncertain_items", "uncertainties", "unclear_items", "review_items"),
+        default=[],
+    )
+
+    if not isinstance(facts_field, list) or not isinstance(uncertain_items, list):
+        raise ValueError("clinical facts payload alan tipleri geçersiz")
+
+    normalized_facts = []
+    for item in facts_field:
+        if not isinstance(item, dict):
+            raise ValueError("clinical fact item dict değil")
+        source_quote = _first_present(item, ("source_quote", "quote", "evidence_quote"))
+        normalized_facts.append(
+            {
+                "category": _first_present(item, ("category", "fact_category", "type")),
+                "text": _first_present(item, ("text", "fact_text", "summary"), default=source_quote),
+                "source_quote": source_quote,
+                "source_role": _first_present(item, ("source_role", "role")),
+                "source_speaker": _first_present(item, ("source_speaker", "speaker_id", "speaker")),
+                "tooth_number_fdi": _first_present(item, ("tooth_number_fdi", "fdi", "tooth_number"), default=None),
+                "status": _first_present(item, ("status", "procedure_status"), default=None),
+                "is_uncertain": bool(_first_present(item, ("is_uncertain", "uncertain"), default=False)),
+            }
+        )
+
+    return {"facts": normalized_facts, "uncertain_items": [str(i) for i in uncertain_items]}
+
+
+def _loads_llm_json_object(raw_output: str) -> object:
+    """LLM JSON modunda bile bazen geçerli objeden sonra fence/brace artığı
+    bırakabiliyor. İlk geçerli JSON nesnesini al; anlamlı ekstra metin varsa
+    parse hatası say.
+    """
+    stripped = raw_output.strip()
+    data, end_idx = json.JSONDecoder().raw_decode(stripped)
+    trailing = stripped[end_idx:].strip()
+    compact_trailing = "".join(ch for ch in trailing if not ch.isspace())
+    if compact_trailing and any(ch not in "}`" for ch in compact_trailing):
+        raise ValueError("JSON nesnesinden sonra anlamlı metin var")
+    return data
+
+
+def _first_present(data: dict, keys: tuple[str, ...], default: object = ...):
+    for key in keys:
+        if key in data:
+            return data[key]
+    if default is ...:
+        raise KeyError(keys[0])
+    return default
+
+
+def _validate_fact_source_quotes(
+    transcript: RoleLabelledTranscript, facts: ClinicalFactsBundle
+) -> None:
+    """Her source_quote transkriptte birebir geçmeli ve speaker/role eşleşmeli."""
+    utterance_by_speaker: dict[str, list[RoleLabelledUtterance]] = {}
+    for utterance in transcript.utterances:
+        utterance_by_speaker.setdefault(utterance.speaker_id, []).append(utterance)
+
+    for fact in facts.facts:
+        matching_utterances = [
+            u
+            for u in utterance_by_speaker.get(fact.source_speaker, [])
+            if fact.source_quote and fact.source_quote in u.text
+        ]
+        if not matching_utterances:
+            raise ValueError("source_quote transkriptte birebir bulunamadı")
+        if not any(u.role == fact.source_role for u in matching_utterances):
+            raise ValueError("source_role transcript role ile eşleşmedi")
+        if fact.tooth_number_fdi is not None and not _is_valid_fdi(fact.tooth_number_fdi):
+            raise ValueError("geçersiz FDI")
+
+
+def _normalize_validated_clinical_facts(
+    transcript: RoleLabelledTranscript, facts: ClinicalFactsBundle
+) -> ClinicalFactsBundle:
+    """Klinik içerik üretmeden sözleşme normalizasyonu yap.
+
+    - `status` yalnızca `procedures` fact'lerinde anlamlıdır.
+    - Hasta/asistan kaynaklı FDI, aynı utterance'ta açık sayı yoksa taşınmaz;
+      bu, hastanın "bu diş" sözünden hekim cümlesindeki numarayı modele
+      taşıtmamaya yarayan güvenli bir guard'dır. Hekim kaynaklı FDI bağlamı
+      taşınabilir, ama mırıltılı/okunmayan numara temizlenir.
+    """
+    utterances_by_speaker: dict[str, list[RoleLabelledUtterance]] = {}
+    for utterance in transcript.utterances:
+        utterances_by_speaker.setdefault(utterance.speaker_id, []).append(utterance)
+
+    normalized: list[ClinicalFact] = []
+    for fact in facts.facts:
+        updates = {}
+        source_utterance = next(
+            (
+                u
+                for u in utterances_by_speaker.get(fact.source_speaker, [])
+                if fact.source_quote in u.text
+            ),
+            None,
+        )
+        source_text_lower = source_utterance.text.lower() if source_utterance else ""
+
+        if fact.category != FactCategory.PROCEDURES and fact.status is not None:
+            updates["status"] = None
+        if (
+            fact.category == FactCategory.CLINICAL_FINDINGS
+            and ("tam okunmuyor" in source_text_lower or "mi, tam" in source_text_lower)
+            and not fact.is_uncertain
+        ):
+            updates["is_uncertain"] = True
+        if fact.tooth_number_fdi is not None:
+            if source_utterance is None:
+                updates["tooth_number_fdi"] = None
+            else:
+                if "tam okunmuyor" in source_text_lower or "mi, tam" in source_text_lower:
+                    updates["tooth_number_fdi"] = None
+                elif fact.source_role != DentistRole.DENTIST and str(fact.tooth_number_fdi) not in source_utterance.text:
+                    updates["tooth_number_fdi"] = None
+        normalized.append(fact.model_copy(update=updates) if updates else fact)
+
+    uncertain_items = list(facts.uncertain_items)
+    transcript_text_lower = "\n".join(u.text for u in transcript.utterances).lower()
+    if "tam okunmuyor" in transcript_text_lower and not any(
+        "diş numarası" in item.lower() for item in uncertain_items
+    ):
+        uncertain_items.append("Diş numarası net değil: transkriptte numaranın tam okunmadığı belirtilmiş.")
+
+    return ClinicalFactsBundle(
+        session_id=facts.session_id,
+        facts=normalized,
+        uncertain_items=uncertain_items,
+    )
+
+
+def _is_valid_fdi(tooth_number: int) -> bool:
+    quadrant, tooth = divmod(tooth_number, 10)
+    return quadrant in (1, 2, 3, 4) and 1 <= tooth <= 8
+
+
+def _fail_safe_clinical_facts(session_id: str) -> ClinicalFactsBundle:
+    return ClinicalFactsBundle(
+        session_id=session_id,
+        facts=[],
+        uncertain_items=[
+            "Clinical facts extraction çıktısı parse edilemedi veya provenance doğrulamasını geçemedi; hekim incelemesi gerekir."
+        ],
+    )
+
+
+def generate_clinical_note(facts: ClinicalFactsBundle, llm: LLMProvider) -> ClinicalNoteDraft:
+    """clinical_note_generation LLM aşaması — STUB DEĞİL.
 
     Kontrat (CLAUDE.md aşama 2→3): yalnızca `facts`'ten üretir, yeni bilgi
     eklemez, PARAPHRASE ETMEZ — her `NoteSentence.text` ilgili fact'in
     `text`'i, `source_quote`/`source_role` o fact'ten DEĞİŞMEDEN taşınır.
+
+    LLM çıktısı bu kontratı bozarsa sessizce kabul edilmez; güvenli
+    deterministik fact→note taşımasına düşülür. Bu fallback yeni bilgi
+    üretmez, sadece zaten güvenli sayılmış fact'leri doğru bölüme taşır.
 
     Invariant (CLAUDE.md §4.2) burada BAĞIMSIZ olarak da uygulanır:
     `_enforce_source_role_invariant` upstream extraction'a güvenmeden,
@@ -400,8 +610,31 @@ def generate_clinical_note(facts: ClinicalFactsBundle) -> ClinicalNoteDraft:
     """
     safe_facts = _enforce_source_role_invariant(facts)
 
+    system_prompt = load_system_prompt(CLINICAL_NOTE_PROMPT_FILE)
+    user_input = _build_clinical_note_user_input(safe_facts)
+
+    try:
+        raw_output = llm.complete(system_prompt, user_input)
+        note = _normalize_clinical_note_payload(
+            safe_facts.session_id,
+            _loads_llm_json_object(raw_output),
+        )
+        _validate_note_against_facts(safe_facts, note)
+        return note
+    except Exception:
+        # KVKK (CLAUDE.md §5): ham LLM çıktısı/fact metni loga YAZILMAZ
+        # — yalnızca session_id.
+        logger.error(
+            "clinical_note_llm_output_invalid: session_id=%s — deterministik fact->note fallback kullanılıyor.",
+            safe_facts.session_id,
+        )
+        return _deterministic_clinical_note_from_facts(safe_facts)
+
+
+def _deterministic_clinical_note_from_facts(facts: ClinicalFactsBundle) -> ClinicalNoteDraft:
+    """Güvenli fallback: her fact'i kategori eşleşmesine göre not bölümüne taşır."""
     sections: dict[str, list[NoteSentence]] = {section: [] for section in _CATEGORY_TO_NOTE_SECTION.values()}
-    for idx, fact in enumerate(safe_facts.facts):
+    for idx, fact in enumerate(facts.facts):
         section = _CATEGORY_TO_NOTE_SECTION.get(fact.category)
         if section is None:
             continue
@@ -415,27 +648,209 @@ def generate_clinical_note(facts: ClinicalFactsBundle) -> ClinicalNoteDraft:
         )
 
     return ClinicalNoteDraft(
-        session_id=safe_facts.session_id,
-        uncertain_items=list(safe_facts.uncertain_items),
+        session_id=facts.session_id,
+        uncertain_items=list(facts.uncertain_items),
         **sections,
     )
 
 
+def _build_clinical_note_user_input(facts: ClinicalFactsBundle) -> str:
+    """Prompt dosyasının 'Input format' bölümüyle hizalı kullanıcı girdisi."""
+    return "Clinical facts bundle:\n" + facts.model_dump_json(exclude_none=False)
+
+
+def _normalize_clinical_note_payload(session_id: str, data: object) -> ClinicalNoteDraft:
+    if not isinstance(data, dict):
+        raise ValueError("clinical note payload dict değil")
+
+    payload = {
+        "session_id": session_id,
+        "patient_complaint": _first_present(data, ("patient_complaint",), default=[]),
+        "history": _first_present(data, ("history",), default=[]),
+        "clinical_findings": _first_present(data, ("clinical_findings",), default=[]),
+        "assessment": _first_present(data, ("assessment",), default=[]),
+        "treatment_plan": _first_present(data, ("treatment_plan",), default=[]),
+        "procedures_note": _first_present(data, ("procedures_note", "procedures"), default=[]),
+        "uncertain_items": _first_present(data, ("uncertain_items", "uncertainties"), default=[]),
+        "is_draft": _first_present(data, ("is_draft",), default=True),
+    }
+    return ClinicalNoteDraft.model_validate(payload)
+
+
+def _validate_note_against_facts(facts: ClinicalFactsBundle, note: ClinicalNoteDraft) -> None:
+    """Note cümleleri input fact'leri birebir ve doğru section'da taşımalı."""
+    if note.session_id != facts.session_id:
+        raise ValueError("note session_id facts ile eşleşmedi")
+    if not note.is_draft:
+        raise ValueError("note is_draft=false olamaz")
+    if note.uncertain_items != facts.uncertain_items:
+        raise ValueError("uncertain_items birebir taşınmadı")
+
+    expected_by_section: dict[str, list[tuple[str, DentistRole, str]]] = {
+        section: [] for section in _CATEGORY_TO_NOTE_SECTION.values()
+    }
+    for fact in facts.facts:
+        section = _CATEGORY_TO_NOTE_SECTION.get(fact.category)
+        if section is None:
+            continue
+        expected_by_section[section].append((fact.text, fact.source_role, fact.source_quote))
+
+    actual_by_section: dict[str, list[tuple[str, DentistRole, str]]] = {
+        "patient_complaint": [(s.text, s.source_role, s.source_quote) for s in note.patient_complaint],
+        "history": [(s.text, s.source_role, s.source_quote) for s in note.history],
+        "clinical_findings": [(s.text, s.source_role, s.source_quote) for s in note.clinical_findings],
+        "assessment": [(s.text, s.source_role, s.source_quote) for s in note.assessment],
+        "treatment_plan": [(s.text, s.source_role, s.source_quote) for s in note.treatment_plan],
+        "procedures_note": [(s.text, s.source_role, s.source_quote) for s in note.procedures_note],
+    }
+
+    if actual_by_section != expected_by_section:
+        raise ValueError("note cümleleri fact'lerle birebir/doğru bölümde eşleşmedi")
+
+
 def extract_procedures(facts: ClinicalFactsBundle) -> list[ProcedureObject]:
-    """STUB: gerçek procedure extraction + FDI normalize/doğrulama yok.
+    """Fact JSON'undan deterministik procedure extraction.
 
-    Invariant (CLAUDE.md §4.2) burada da BAĞIMSIZ olarak uygulanır — bu adım
-    şu an stub olduğu için sonuç gözle görünür şekilde değişmez (hâlâ `[]`
-    döner), ama sözleşme şimdiden kurulur: ileride procedure'ler facts'ten
-    türetilirken, dentist olmayan source_role'den gelen clinical_findings/
-    assessment/treatment_plan fact'leri asla doğrudan procedure kanıtı
-    olarak kullanılmaz.
+    LLM çağrısı YOK; yalnızca `ClinicalFact(category=procedures)` kayıtları
+    kapalı ve küçük bir kural setiyle `ProcedureObject`'e çevrilir. Tanınmayan
+    işlem ailesi için obje üretilmez — procedure_family uydurmak sonraki kod
+    eşleştirme adımında kapalı DB kuralını zedeler (CLAUDE.md §4.1, §4.5).
+
+    Invariant (CLAUDE.md §4.2) burada da BAĞIMSIZ uygulanır: hasta/asistan
+    kaynaklı procedure iddiası işlem objesine dönüşmez.
     """
-    _enforce_source_role_invariant(facts)
-    return []
+    safe_facts = _enforce_source_role_invariant(facts)
+    procedures: list[ProcedureObject] = []
+
+    for fact in safe_facts.facts:
+        if fact.category != FactCategory.PROCEDURES or fact.source_role != DentistRole.DENTIST:
+            continue
+
+        procedure_family = _detect_procedure_family(fact)
+        if procedure_family is None:
+            continue
+
+        procedures.append(
+            ProcedureObject(
+                procedure_family=procedure_family,
+                tooth_number_fdi=fact.tooth_number_fdi if _is_valid_optional_fdi(fact.tooth_number_fdi) else None,
+                surface_count=_detect_surface_count(fact),
+                canal_count=_detect_canal_count(fact) if procedure_family == "kanal_tedavisi" else None,
+                status=fact.status or ProcedureStatus.UNCLEAR,
+                source_quotes=[fact.source_quote],
+            )
+        )
+
+    return procedures
 
 
-def match_codes_and_checklist(procedures: list[ProcedureObject]) -> list[CodeSuggestionBundle]:
-    """STUB: gerçek deterministik TDB DB araması + checklist değerlendirme +
-    LLM açıklama katmanı yok. Bkz. docs/tdb-code-matching-spec.md §3 (Katman C)."""
-    return []
+def _detect_procedure_family(fact: ClinicalFact) -> Optional[str]:
+    fact_text = _normalize_lookup_text(fact.text)
+    text = _procedure_text(fact)
+
+    if _is_negated_procedure_text(text):
+        return None
+
+    if _has_any(fact_text, ("kanal tedavisi", "endodontik tedavi")):
+        return "kanal_tedavisi"
+
+    if _has_any(fact_text, ("geçici", "gecici")) and _has_any(
+        fact_text, ("dolgu", "restorasyon")
+    ):
+        return "gecici_restorasyon"
+
+    if "kompozit" in fact_text:
+        return "kompozit_dolgu"
+
+    if _has_any(text, ("kompozit", "dolgu", "restorasyon")):
+        if _has_any(text, ("geçici", "gecici")):
+            return "gecici_restorasyon"
+        if "kompozit" in text:
+            return "kompozit_dolgu"
+        if "dolgu" in text:
+            return "kompozit_dolgu"
+
+    if _has_any(text, ("kanal tedavisi", "endodontik tedavi")):
+        return "kanal_tedavisi"
+
+    if _has_any(text, ("diş çekimi", "dis cekimi", "çekim", "cekim")):
+        return "dis_cekimi"
+
+    if _has_any(text, ("detertraj", "diş taşı", "dis tasi", "diştaşı", "distasi")):
+        return "detertraj"
+
+    if _has_any(text, ("periapikal röntgen", "periapikal rontgen")):
+        return "periapikal_rontgen"
+
+    if _has_any(text, ("panoramik film", "panoramik röntgen", "panoramik rontgen")):
+        return "panoramik_film"
+
+    return None
+
+
+def _detect_surface_count(fact: ClinicalFact) -> SurfaceCount | None:
+    text = _procedure_text(fact)
+    if _has_any(text, ("tek yüz", "tek yuz", "bir yüz", "bir yuz")):
+        return SurfaceCount.ONE_SURFACE
+    if _has_any(text, ("iki yüz", "iki yuz", "2 yüz", "2 yuz")):
+        return SurfaceCount.TWO_SURFACE
+    if _has_any(text, ("üç yüz", "uc yuz", "üç yuz", "3 yüz", "3 yuz")):
+        return SurfaceCount.THREE_SURFACE
+    if "kompozit" in text or "dolgu" in text:
+        return SurfaceCount.UNCLEAR
+    return None
+
+
+def _detect_canal_count(fact: ClinicalFact) -> CanalCount | None:
+    text = _procedure_text(fact)
+    if _has_any(text, ("tek kanal", "bir kanal", "1 kanal")):
+        return CanalCount.ONE_CANAL
+    if _has_any(text, ("iki kanal", "2 kanal")):
+        return CanalCount.TWO_CANAL
+    if _has_any(text, ("üç kanal", "uc kanal", "3 kanal")):
+        return CanalCount.THREE_CANAL
+    if _has_any(text, ("kanal tedavisi", "endodontik tedavi")):
+        return CanalCount.UNCLEAR
+    return None
+
+
+def _procedure_text(fact: ClinicalFact) -> str:
+    return _normalize_lookup_text(f"{fact.text} {fact.source_quote}")
+
+
+def _normalize_lookup_text(text: str) -> str:
+    return text.casefold().replace("i̇", "i")
+
+
+def _has_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def _is_negated_procedure_text(text: str) -> bool:
+    return _has_any(
+        text,
+        (
+            "gündemde değil",
+            "gundemde degil",
+            "planlanmadı",
+            "planlanmadi",
+            "yapılmayacak",
+            "yapilmayacak",
+            "çekim yok",
+            "cekim yok",
+        ),
+    )
+
+
+def _is_valid_optional_fdi(tooth_number: Optional[int]) -> bool:
+    return tooth_number is None or _is_valid_fdi(tooth_number)
+
+
+def match_codes_and_checklist(
+    procedures: list[ProcedureObject],
+    facts: Optional[ClinicalFactsBundle] = None,
+    llm: Optional[LLMProvider] = None,
+) -> list[CodeSuggestionBundle]:
+    """Pipeline kapısı: fact invariant'ını uygula, TDB matcher'a delege et."""
+    safe_facts = _enforce_source_role_invariant(facts) if facts is not None else None
+    return _tdb_match_codes_and_checklist(procedures, safe_facts, llm)

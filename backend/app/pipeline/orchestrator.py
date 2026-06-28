@@ -68,13 +68,14 @@ def run_pipeline(
         result.stopped_at_stage = "role_assignment"
         return result
 
-    return _continue_after_role_assignment(result, speaker_labelled, role_assignment)
+    return _continue_after_role_assignment(result, speaker_labelled, role_assignment, llm_provider)
 
 
 def resume_after_role_review(
     result: PipelineResult,
     speaker_labelled: SpeakerLabelledTranscript,
     corrected_role_assignment: RoleAssignmentResult,
+    llm_provider: LLMProvider,
 ) -> PipelineResult:
     """Hekim, REVIEW GATE'te durdurulan rol atamasını düzelttikten sonra
     pipeline'ı devam ettirir.
@@ -89,7 +90,7 @@ def resume_after_role_review(
         result.stopped_at_stage = "role_assignment"
         return result
 
-    return _continue_after_role_assignment(result, speaker_labelled, corrected_role_assignment)
+    return _continue_after_role_assignment(result, speaker_labelled, corrected_role_assignment, llm_provider)
 
 
 def apply_dentist_review(
@@ -136,6 +137,7 @@ def _continue_after_role_assignment(
     result: PipelineResult,
     speaker_labelled: SpeakerLabelledTranscript,
     role_assignment: RoleAssignmentResult,
+    llm_provider: LLMProvider,
 ) -> PipelineResult:
     """REVIEW GATE geçildikten sonraki tüm aşamalar (facts → note →
     procedures → code matching). Bu aşamaların içerik üretimi STUB'tır.
@@ -160,10 +162,10 @@ def _continue_after_role_assignment(
     result.role_labelled_transcript = role_labelled
 
     try:
-        facts = stages.extract_clinical_facts(role_labelled)
-        note = stages.generate_clinical_note(facts)
+        facts = stages.extract_clinical_facts(role_labelled, llm_provider)
+        note = stages.generate_clinical_note(facts, llm_provider)
         procedures = stages.extract_procedures(facts)
-        code_suggestions = stages.match_codes_and_checklist(procedures)
+        code_suggestions = stages.match_codes_and_checklist(procedures, facts, llm_provider)
     except SourceRoleInvariantViolation as exc:
         logger.error(
             "source_role_invariant_violation_caught: session_id=%s speaker=%s category=%s",

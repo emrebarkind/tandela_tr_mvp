@@ -192,6 +192,11 @@ class RoleAssignmentResult(BaseModel):
 
 
 class RoleLabelledUtterance(BaseModel):
+    # `speaker_id` rol ataması SONRASI bile saklanır: `ClinicalFact.source_speaker`
+    # (clinical_facts_extraction aşaması) zorunlu bir provenance alanıdır ve bu
+    # diarization speaker_id'sine ihtiyaç duyar — rol tek başına yeterli değildir
+    # (iki konuşmacı aynı role sahip olabilir, örn. iki "assistant_or_other").
+    speaker_id: str
     role: DentistRole
     text: str
     start_sec: float
