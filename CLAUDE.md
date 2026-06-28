@@ -157,20 +157,29 @@ hekimlerle yazılıp panelde kilitlenir (`authored_by` ile işaretli).
 ### Kod sistemi / Medula / entegrasyon (netleşen kararlar)
 
 - **Kod kaynağı AÇIK KARAR, segmente bağlı.** Gözlemlenen hastane (Medipol
-  HSYS) SUT kodları kullanıyor (örn. P403306, 404220), TDB değil — özel
-  hastane bile Medula'ya SUT'la kodlar. Küçük özel klinik TDB kullanabilir.
-  Hedef segment kararı V1 kod kaynağını belirler; kod DB zaten soyut →
-  kaynak (TDB/SUT) parametrik tutulmalı, koda gömülmemeli.
+  HSYS) SUT kodları kullanıyor (örn. P403306, 404220), TDB Rehber Tarife
+  değil — özel hastane bile Medula'ya SUT'la kodlar. Küçük özel klinik
+  (SGK'sız) TDB kullanabilir. Hedef segment kararı V1 kod kaynağını belirler;
+  kod DB zaten soyut → kaynak (TDB/SUT) parametrik tutulmalı, koda
+  gömülmemeli.
 - **Medula konumlanması.** Ürün Medula'ya DOĞRUDAN bağlanmaz (SGK
   yetkilendirmesi + mevcut HBYS işi gerekir). Değer = Medula'ya gidecek doğru
   SUT kodunu hekim adına hazırlamak; gönderimi klinik kendi HBYS'siyle yapar.
+  Bu, kod kaynağının SUT olmasını güçlü biçimde işaret eder.
 - **Entegrasyon kademeleri.** V1 = copy/export (üçüncü-taraf izni
-  gerektirmez). Doğrudan HSYS/Medula entegrasyonu V2+ — kurum + sağlayıcı +
-  olası Bakanlık iznine bağlı. Çekirdek değer entegrasyona BAĞIMLI olmamalı.
-- **Export hedefi (HSYS-tarzı).** İşlemler diş FDI'ye göre gruplu; her
-  işlemde Planlayan Doktor+Tarih ile Uygulayan Doktor+Uygulama Tarihi AYRI
-  tutulur. `ProcedureObject`'e planlama/uygulama ayrımı V2'de eklenmeli
-  (henüz yok).
+  gerektirmez, bağımsız değer). Doğrudan HSYS/Medula entegrasyonu V2+ —
+  kurum + sistem sağlayıcı + olası Bakanlık iznine bağlı. Çekirdek değer
+  entegrasyona BAĞIMLI olmamalı.
+- **Export hedefi (HSYS-tarzı, gözlemlendi).** İşlemler diş FDI'ye göre
+  gruplu; her işlemde Planlayan Doktor+Tarih ile Uygulayan Doktor+Uygulama
+  Tarihi AYRI tutulur. `ProcedureObject`'e planlama/uygulama ayrımı V2'de
+  eklenmeli (henüz yok).
+- **Çok-seans (V1).** Seanslar `patient_id` altında kronolojik ama
+  BAĞIMSIZ. Yeni seans önceki seansları fact kaynağı olarak KULLANMAZ.
+  Seanslar-arası bağlam V2 kapsamına bırakıldı; geldiğinde yalnızca
+  `APPROVED` notlar, yalnızca hekime REFERANS olarak gösterilecek — fact
+  kaynağı olarak değil. O zaman provenance + §4.2 ("hasta lafı klinik bulgu
+  olamaz") buna göre genişletilmeli.
 
 ---
 
@@ -197,12 +206,24 @@ Dosyayı kısa tut; büyük detay `docs/` altındaki ayrı dosyalara gider.
 
 ---
 
-## 12. Durum notu (devir için — örn. Codex'e)
+## 12. Devir notu (Codex'e devam için)
 
-- `role_assignment` GERÇEK Gemini ile doğrulandı; golden-set'in 4 senaryosu
-  da (role katmanı) yeşil (bkz. `backend/evals/eval_golden_roles.py`,
-  `docs/golden-set.md`).
-- **SIRADAKİ:** `clinical_facts_extraction` prompt'unu `stages.py`'a bağla +
-  eval'e facts assertion'larını ekle. Sonra `clinical_note_generation`.
-  Yöntem aynı: prompt → stage → golden set'e karşı eval → mismatch incele →
-  prompt ya da golden set'i düzelt (`role_assignment`'ta izlenen yol).
+- `role_assignment` GERÇEK Gemini (`gemini-3.5-flash`) ile doğrulandı;
+  golden-set'in 4 senaryosu da (role katmanı) yeşil (bkz.
+  `backend/evals/eval_golden_roles.py`, `docs/golden-set.md`).
+- Prompt'taki ("`backend/app/prompts/role_assignment.md`") üst seviye çıktı
+  anahtarı yanlışlıkla "speakers" idi, "assignments" olarak düzeltildi
+  (`RoleAssignmentResult` tipiyle hizalı). Parse katmanına (`stages.py`)
+  savunma olarak alias fallback eklendi: model yine "speakers" dönerse de
+  kabul edilir; ikisi de yoksa hâlâ fail-safe'e düşer (§4.1 — değişmedi).
+- **SIRADAKİ ADIM:** `clinical_facts_extraction` prompt'unu `stages.py`'a
+  bağla, eval'e facts assertion'larını ekle, golden-set'e karşı çalıştır.
+  Sonra `clinical_note_generation`.
+- **DOĞRULAMA YÖNTEMİ (`role_assignment`'ta izlenen, tekrar kullanılacak):**
+  prompt yaz → stage'e bağla → golden-set'e karşı GERÇEK modelle eval →
+  mismatch incele → ya prompt'u ya golden-set'i düzelt.
+- Gemini eval'i (`eval_golden_roles.py`) yalnızca kendi makinende çalışır —
+  Cowork sandbox'ı Gemini API domain'ini proxy seviyesinde engelliyor
+  (`httpx.ProxyError: 403 Forbidden`, kod/key hatası değil). Repo clone
+  sonrası `backend/.env`'i `.env.example`'dan elle yeniden kurman gerekir
+  (gitignore'da, commit edilmez).
