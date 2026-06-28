@@ -136,6 +136,154 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertNotIn("speaker_labelled_transcript", payload)
         self.assertNotIn("clinical_facts", payload)
 
+    def test_phase_b_session_endpoints_run_gate_resume_and_approve(self) -> None:
+        llm = ScriptedLLM(
+            [
+                {
+                    "assignments": [
+                        {
+                            "speaker_id": "A",
+                            "role": "dentist",
+                            "status": "clear",
+                            "utterance_count": 2,
+                            "reason": "Hekim gibi konuşuyor.",
+                        },
+                        {
+                            "speaker_id": "B",
+                            "role": "patient",
+                            "status": "clear",
+                            "utterance_count": 1,
+                            "reason": "Hasta şikayeti.",
+                        },
+                        {
+                            "speaker_id": "C",
+                            "role": "assistant_or_other",
+                            "status": "review_needed",
+                            "utterance_count": 1,
+                            "reason": "Tek ifade.",
+                        },
+                    ],
+                    "manual_review_required": True,
+                },
+                {
+                    "facts": [
+                        {
+                            "category": "clinical_findings",
+                            "text": "46 numarada derin çürük görüyorum.",
+                            "source_quote": "46 numarada derin çürük görüyorum",
+                            "source_role": "dentist",
+                            "source_speaker": "A",
+                            "tooth_number_fdi": 46,
+                            "status": None,
+                            "is_uncertain": False,
+                        },
+                        {
+                            "category": "procedures",
+                            "text": "46 numara için kanal tedavisi planlandı.",
+                            "source_quote": "46 numara için kanal tedavisi planlandı",
+                            "source_role": "dentist",
+                            "source_speaker": "A",
+                            "tooth_number_fdi": 46,
+                            "status": "planned",
+                            "is_uncertain": False,
+                        },
+                    ],
+                    "uncertain_items": [],
+                },
+                {
+                    "patient_complaint": [],
+                    "history": [],
+                    "clinical_findings": [
+                        {
+                            "sentence_id": "s0",
+                            "text": "46 numarada derin çürük görüyorum.",
+                            "source_role": "dentist",
+                            "source_quote": "46 numarada derin çürük görüyorum",
+                        }
+                    ],
+                    "assessment": [],
+                    "treatment_plan": [],
+                    "procedures_note": [
+                        {
+                            "sentence_id": "s1",
+                            "text": "46 numara için kanal tedavisi planlandı.",
+                            "source_role": "dentist",
+                            "source_quote": "46 numara için kanal tedavisi planlandı",
+                        }
+                    ],
+                    "uncertain_items": [],
+                    "is_draft": True,
+                },
+                {
+                    "explanations": [
+                        {"code": "FIX-KANAL-1K", "fit_reason": "Aday listesinde.", "caveat": None},
+                        {"code": "FIX-KANAL-2K", "fit_reason": "Aday listesinde.", "caveat": None},
+                        {"code": "FIX-KANAL-3K", "fit_reason": "Aday listesinde.", "caveat": None},
+                    ],
+                    "ambiguity_note": "Kanal sayısı net değil.",
+                    "dentist_must_choose": True,
+                },
+            ]
+        )
+        app.dependency_overrides[get_llm_provider] = lambda: llm
+        client = TestClient(app)
+
+        create_response = client.post(
+            "/sessions",
+            headers=AUTH_HEADERS,
+            json={
+                "session_id": "phase-b-loop",
+                "utterances": [
+                    {"speaker_id": "A", "text": "46 numarada derin çürük görüyorum."},
+                    {"speaker_id": "B", "text": "Ağrım var."},
+                    {"speaker_id": "C", "text": "Röntgeni açıyorum."},
+                    {"speaker_id": "A", "text": "46 numara için kanal tedavisi planlandı."},
+                ],
+            },
+        )
+
+        self.assertEqual(create_response.status_code, 200)
+        create_payload = create_response.json()
+        self.assertEqual(create_payload["review_state"], "needs_dentist_role_review")
+        self.assertEqual(create_payload["next_action"], "review_speaker_roles")
+        self.assertIsNone(create_payload["dentist_review"])
+        self.assertEqual(create_payload["role_review"]["speakers"][2]["review_state"], "review_needed")
+
+        resume_response = client.post(
+            "/sessions/phase-b-loop/resume-role-review",
+            headers=AUTH_HEADERS,
+            json={
+                "corrected_roles": [
+                    {"speaker_id": "A", "role": "dentist", "status": "clear"},
+                    {"speaker_id": "B", "role": "patient", "status": "clear"},
+                    {"speaker_id": "C", "role": "assistant_or_other", "status": "clear"},
+                ]
+            },
+        )
+
+        self.assertEqual(resume_response.status_code, 200)
+        resume_payload = resume_response.json()
+        self.assertEqual(resume_payload["review_state"], "draft_requires_dentist_approval")
+        self.assertEqual(resume_payload["next_action"], "review_note_and_codes")
+        self.assertIsNotNone(resume_payload["dentist_review"])
+        self.assertEqual(
+            resume_payload["dentist_review"]["note"]["clinical_findings"][0]["source_quote"],
+            "46 numarada derin çürük görüyorum",
+        )
+
+        approve_response = client.post(
+            "/sessions/phase-b-loop/approve",
+            headers=AUTH_HEADERS,
+            json={"selected_codes": ["FIX-KANAL-2K"], "approved": True},
+        )
+
+        self.assertEqual(approve_response.status_code, 200)
+        approve_payload = approve_response.json()
+        self.assertEqual(approve_payload["review_state"], "approved_ready_for_export")
+        self.assertEqual(approve_payload["next_action"], "export")
+        self.assertIn("46 numarada derin çürük görüyorum.", approve_payload["export_payload"]["clinical_note_text"])
+        self.assertEqual(approve_payload["export_payload"]["selected_codes"], ["FIX-KANAL-2K"])
+
     def test_resume_after_role_review_runs_to_dentist_review(self) -> None:
         request = TranscriptResumeAfterRoleReviewRequest(
             session_id="api-resume",

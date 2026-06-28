@@ -17,10 +17,14 @@ from app.api.auth import AuthContext, get_auth_context
 from app.api.session_pipeline import (
     ApproveReviewRequest,
     PipelineReviewResponse,
+    ResumeRoleReviewRequest,
     TranscriptAnalyzeRequest,
     TranscriptResumeAfterRoleReviewRequest,
+    approve_session_review,
     approve_review,
     analyze_transcript,
+    create_session_from_transcript,
+    resume_session_after_role_review,
     resume_transcript_after_role_review,
     to_review_response,
 )
@@ -77,6 +81,37 @@ def get_session_repository() -> Iterator[SessionRepository]:
         db.close()
 
 
+@router.post("", response_model=PipelineReviewResponse)
+def create_session_endpoint(
+    request: TranscriptAnalyzeRequest,
+    llm_provider: LLMProvider = Depends(get_llm_provider),
+    auth: AuthContext = Depends(get_auth_context),
+) -> PipelineReviewResponse:
+    _ = auth
+    try:
+        result = create_session_from_transcript(request, llm_provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return to_review_response(result)
+
+
+@router.post("/{session_id}/resume-role-review", response_model=PipelineReviewResponse)
+def resume_session_role_review_endpoint(
+    session_id: str,
+    request: ResumeRoleReviewRequest,
+    llm_provider: LLMProvider = Depends(get_llm_provider),
+    auth: AuthContext = Depends(get_auth_context),
+) -> PipelineReviewResponse:
+    _ = auth
+    try:
+        result = resume_session_after_role_review(session_id, request, llm_provider)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session bulunamadı.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return to_review_response(result)
+
+
 @router.post("/transcripts/analyze", response_model=PipelineReviewResponse)
 def analyze_transcript_endpoint(
     request: TranscriptAnalyzeRequest,
@@ -86,22 +121,23 @@ def analyze_transcript_endpoint(
 ) -> PipelineReviewResponse:
     result = analyze_transcript(request, llm_provider)
     response = to_review_response(result)
+    session_id = result.session_id
     repository.save_transcript(
-        request.session_id,
+        session_id,
         [utterance.model_dump(mode="json") for utterance in request.utterances],
         source="manual_transcript",
         clinic_id=auth.clinic_id,
         actor_user_id=auth.user_id,
     )
     repository.upsert_session(
-        request.session_id,
+        session_id,
         status=result.status.value,
         current_stage=result.stopped_at_stage,
         clinic_id=auth.clinic_id,
     )
     if result.clinical_note is not None:
         repository.save_clinical_note(
-            request.session_id,
+            session_id,
             result.clinical_note,
             clinic_id=auth.clinic_id,
             actor_user_id=auth.user_id,
@@ -118,22 +154,23 @@ def resume_after_role_review_endpoint(
 ) -> PipelineReviewResponse:
     result = resume_transcript_after_role_review(request, llm_provider)
     response = to_review_response(result)
+    session_id = result.session_id
     repository.save_transcript(
-        request.session_id,
+        session_id,
         [utterance.model_dump(mode="json") for utterance in request.utterances],
         source="role_reviewed_transcript",
         clinic_id=auth.clinic_id,
         actor_user_id=auth.user_id,
     )
     repository.upsert_session(
-        request.session_id,
+        session_id,
         status=result.status.value,
         current_stage=result.stopped_at_stage,
         clinic_id=auth.clinic_id,
     )
     if result.clinical_note is not None:
         repository.save_clinical_note(
-            request.session_id,
+            session_id,
             result.clinical_note,
             clinic_id=auth.clinic_id,
             actor_user_id=auth.user_id,
@@ -167,6 +204,22 @@ def approve_review_endpoint(
         clinic_id=auth.clinic_id,
     )
     return response
+
+
+@router.post("/{session_id}/approve", response_model=PipelineReviewResponse)
+def approve_session_endpoint(
+    session_id: str,
+    request: ApproveReviewRequest,
+    auth: AuthContext = Depends(get_auth_context),
+) -> PipelineReviewResponse:
+    trusted_request = request.model_copy(update={"reviewer_user_id": auth.user_id})
+    try:
+        result = approve_session_review(session_id, trusted_request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session bulunamadı.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return to_review_response(result)
 
 
 @router.post("/audio/process", response_model=AudioProcessResponse)

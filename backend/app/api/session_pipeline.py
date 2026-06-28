@@ -8,6 +8,7 @@ transkript üzerinden aynı klinik pipeline kapılarını çalıştırır.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -18,6 +19,7 @@ from app.pipeline.types import (
     CandidateCode,
     ClinicalNoteDraft,
     CodeExplanation,
+    CodeMatchState,
     CodeMatchResult,
     CodeSuggestionBundle,
     DentistRole,
@@ -49,7 +51,8 @@ class RoleCorrectionIn(BaseModel):
 
 
 class TranscriptAnalyzeRequest(BaseModel):
-    session_id: str
+    session_id: Optional[str] = None
+    transcript_text: Optional[str] = None
     utterances: list[TranscriptUtteranceIn] = Field(default_factory=list)
 
 
@@ -57,18 +60,33 @@ class TranscriptResumeAfterRoleReviewRequest(TranscriptAnalyzeRequest):
     corrected_roles: list[RoleCorrectionIn] = Field(default_factory=list)
 
 
+class ResumeRoleReviewRequest(BaseModel):
+    corrected_roles: list[RoleCorrectionIn] = Field(default_factory=list)
+    transcript_text: Optional[str] = None
+    utterances: list[TranscriptUtteranceIn] = Field(default_factory=list)
+
+
 class ApproveReviewRequest(BaseModel):
-    session_id: str
+    session_id: Optional[str] = None
     selected_codes: list[str] = Field(default_factory=list)
     reviewer_user_id: Optional[str] = None
     approved: bool = True
     approved_note: Optional[ClinicalNoteDraft] = None
 
 
+class SessionState(BaseModel):
+    session_id: str
+    transcript: SpeakerLabelledTranscript
+    result: PipelineResult
+    created_at_utc: str
+    updated_at_utc: str
+
+
 class RoleReviewSpeakerOut(BaseModel):
     speaker_id: str
     role: DentistRole
     status: RoleStatus
+    review_state: RoleStatus
     utterance_count: int
     reason: Optional[str] = None
 
@@ -80,6 +98,7 @@ class RoleReviewOut(BaseModel):
 
 class ProcedureCodeReviewOut(BaseModel):
     procedure: ProcedureObject
+    review_state: CodeMatchState
     candidates: list[CandidateCode] = Field(default_factory=list)
     match_results: list[CodeMatchResult] = Field(default_factory=list)
     explanations: list[CodeExplanation] = Field(default_factory=list)
@@ -88,6 +107,7 @@ class ProcedureCodeReviewOut(BaseModel):
 
 
 class DentistReviewOut(BaseModel):
+    review_state: str = "draft_requires_dentist_approval"
     note: ClinicalNoteDraft
     procedures: list[ProcedureCodeReviewOut] = Field(default_factory=list)
     uncertain_items: list[str] = Field(default_factory=list)
@@ -112,11 +132,15 @@ class ExportPayloadOut(BaseModel):
 class PipelineReviewResponse(BaseModel):
     session_id: str
     status: PipelineStatus
+    review_state: str
     stopped_at_stage: Optional[str] = None
     next_action: str
     role_review: Optional[RoleReviewOut] = None
     dentist_review: Optional[DentistReviewOut] = None
     export_payload: Optional[ExportPayloadOut] = None
+
+
+_SESSION_STORE: dict[str, SessionState] = {}
 
 
 def analyze_transcript(
@@ -191,17 +215,105 @@ def approve_review(request: ApproveReviewRequest) -> PipelineResult:
     return result
 
 
+def create_session_from_transcript(
+    request: TranscriptAnalyzeRequest,
+    llm_provider: LLMProvider,
+) -> PipelineResult:
+    session_id = request.session_id or f"session-{uuid4().hex[:12]}"
+    normalized_request = request.model_copy(update={"session_id": session_id})
+    result = analyze_transcript(normalized_request, llm_provider)
+    _store_session_result(session_id, result)
+    return result
+
+
+def resume_session_after_role_review(
+    session_id: str,
+    request: ResumeRoleReviewRequest,
+    llm_provider: LLMProvider,
+) -> PipelineResult:
+    existing = _SESSION_STORE.get(session_id)
+    utterances = request.utterances
+    transcript_text = request.transcript_text
+    if not utterances and transcript_text is None:
+        if existing is None:
+            raise KeyError(session_id)
+        utterances = [
+            TranscriptUtteranceIn(
+                speaker_id=utterance.speaker_id,
+                text=utterance.text,
+                start_sec=utterance.start_sec,
+                end_sec=utterance.end_sec,
+            )
+            for utterance in existing.transcript.utterances
+        ]
+
+    result = resume_transcript_after_role_review(
+        TranscriptResumeAfterRoleReviewRequest(
+            session_id=session_id,
+            transcript_text=transcript_text,
+            utterances=utterances,
+            corrected_roles=request.corrected_roles,
+        ),
+        llm_provider,
+    )
+    _store_session_result(session_id, result)
+    return result
+
+
+def approve_session_review(
+    session_id: str,
+    request: ApproveReviewRequest,
+) -> PipelineResult:
+    existing = _SESSION_STORE.get(session_id)
+    if existing is None:
+        raise KeyError(session_id)
+    if existing.result.status != PipelineStatus.AWAITING_DENTIST_REVIEW:
+        raise ValueError("Session hekim review aşamasında değil; onaysız export üretilemez.")
+
+    approved_note = request.approved_note or existing.result.clinical_note
+    result = approve_review(
+        request.model_copy(
+            update={
+                "session_id": session_id,
+                "approved_note": approved_note,
+            }
+        )
+    )
+    result.speaker_labelled_transcript = existing.result.speaker_labelled_transcript
+    result.role_assignment = existing.result.role_assignment
+    result.role_labelled_transcript = existing.result.role_labelled_transcript
+    result.clinical_facts = existing.result.clinical_facts
+    result.clinical_note = approved_note
+    result.procedures = existing.result.procedures
+    result.code_suggestions = existing.result.code_suggestions
+    _store_session_result(session_id, result)
+    return result
+
+
 def to_review_response(result: PipelineResult) -> PipelineReviewResponse:
     """PipelineResult'ı frontend review ekranının tükettiği dar DTO'ya çevir."""
     return PipelineReviewResponse(
         session_id=result.session_id,
         status=result.status,
+        review_state=_review_state(result.status),
         stopped_at_stage=result.stopped_at_stage,
         next_action=_next_action(result.status),
         role_review=_build_role_review(result),
         dentist_review=_build_dentist_review(result),
         export_payload=_build_export_payload(result),
     )
+
+
+def _review_state(status: PipelineStatus) -> str:
+    if status == PipelineStatus.NEEDS_DENTIST_ROLE_REVIEW:
+        return "needs_dentist_role_review"
+    if status == PipelineStatus.AWAITING_DENTIST_REVIEW:
+        return "draft_requires_dentist_approval"
+    if status == PipelineStatus.APPROVED:
+        return "approved_ready_for_export"
+    if status == PipelineStatus.EXPORTED:
+        return "exported"
+    return "processing"
 
 
 def _next_action(status: PipelineStatus) -> str:
@@ -225,6 +337,7 @@ def _build_role_review(result: PipelineResult) -> Optional[RoleReviewOut]:
                 speaker_id=assignment.speaker_id,
                 role=assignment.role,
                 status=assignment.status,
+                review_state=assignment.status,
                 utterance_count=assignment.utterance_count,
                 reason=assignment.reason,
             )
@@ -244,9 +357,15 @@ def _build_dentist_review(result: PipelineResult) -> Optional[DentistReviewOut]:
     procedure_reviews = []
     for idx, procedure in enumerate(result.procedures):
         bundle = bundles_by_index.get(idx)
+        review_state = (
+            bundle.match_results[0].match_state
+            if bundle is not None and bundle.match_results
+            else CodeMatchState.NO_MATCH
+        )
         procedure_reviews.append(
             ProcedureCodeReviewOut(
                 procedure=procedure,
+                review_state=review_state,
                 candidates=bundle.candidates if bundle is not None else [],
                 match_results=bundle.match_results if bundle is not None else [],
                 explanations=bundle.explanations if bundle is not None else [],
@@ -315,8 +434,13 @@ def _format_note_for_export(note: Optional[ClinicalNoteDraft]) -> str:
 def _build_speaker_labelled_transcript(
     request: TranscriptAnalyzeRequest,
 ) -> SpeakerLabelledTranscript:
+    session_id = request.session_id or f"session-{uuid4().hex[:12]}"
+    input_utterances = request.utterances or _parse_transcript_text(request.transcript_text)
+    if not input_utterances:
+        raise ValueError("Transkript boş olamaz.")
+
     utterances = []
-    for idx, item in enumerate(request.utterances):
+    for idx, item in enumerate(input_utterances):
         start_sec = item.start_sec if item.start_sec is not None else float(idx)
         end_sec = item.end_sec if item.end_sec is not None else start_sec + 1.0
         utterances.append(
@@ -327,7 +451,37 @@ def _build_speaker_labelled_transcript(
                 end_sec=end_sec,
             )
         )
-    return SpeakerLabelledTranscript(session_id=request.session_id, utterances=utterances)
+    return SpeakerLabelledTranscript(session_id=session_id, utterances=utterances)
+
+
+def _parse_transcript_text(transcript_text: Optional[str]) -> list[TranscriptUtteranceIn]:
+    if not transcript_text:
+        return []
+
+    parsed: list[TranscriptUtteranceIn] = []
+    plain_lines: list[str] = []
+    for raw_line in transcript_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            speaker_id, text = line.split(":", 1)
+            speaker_id = speaker_id.strip()
+            text = text.strip()
+            if speaker_id and text:
+                parsed.append(TranscriptUtteranceIn(speaker_id=speaker_id, text=text))
+                continue
+        plain_lines.append(line)
+
+    if parsed and not plain_lines:
+        return parsed
+    if parsed and plain_lines:
+        parsed.extend(TranscriptUtteranceIn(speaker_id="A", text=line) for line in plain_lines)
+        return parsed
+
+    # Düz metin diarization bilgisi taşımaz; tek nötr konuşmacı olarak verilir.
+    # REVIEW GATE bu belirsizliği hekim rol onayına taşıyabilir.
+    return [TranscriptUtteranceIn(speaker_id="A", text=" ".join(plain_lines))]
 
 
 def _build_corrected_role_assignment(
@@ -356,7 +510,7 @@ def _build_corrected_role_assignment(
             for sid in sorted(speaker_ids)
         ]
         return RoleAssignmentResult(
-            session_id=request.session_id,
+            session_id=request.session_id or transcript.session_id,
             assignments=assignments,
             manual_review_required=True,
         )
@@ -373,9 +527,27 @@ def _build_corrected_role_assignment(
     ]
 
     return RoleAssignmentResult(
-        session_id=request.session_id,
+        session_id=request.session_id or transcript.session_id,
         assignments=assignments,
         manual_review_required=False,
+    )
+
+
+def _store_session_result(session_id: str, result: PipelineResult) -> None:
+    transcript = result.speaker_labelled_transcript
+    if transcript is None:
+        existing = _SESSION_STORE.get(session_id)
+        if existing is None:
+            return
+        transcript = existing.transcript
+    now = datetime.now(timezone.utc).isoformat()
+    existing = _SESSION_STORE.get(session_id)
+    _SESSION_STORE[session_id] = SessionState(
+        session_id=session_id,
+        transcript=transcript,
+        result=result,
+        created_at_utc=existing.created_at_utc if existing is not None else now,
+        updated_at_utc=now,
     )
 
 

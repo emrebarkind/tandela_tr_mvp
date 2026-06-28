@@ -7,11 +7,14 @@ import {
   ChevronDown,
   CircleDot,
   ClipboardList,
+  Copy,
+  Download,
   FileText,
   ListChecks,
   Loader2,
   Mic2,
   Play,
+  Printer,
   RotateCcw,
   Save,
   ShieldCheck,
@@ -93,6 +96,7 @@ type Speaker = {
 };
 
 type NoteSentence = {
+  sentence_id?: string;
   text: string;
   source_quote: string;
   source_role: Role;
@@ -106,6 +110,7 @@ type ClinicalNote = {
   treatment_plan: NoteSentence[];
   procedures_note: NoteSentence[];
   uncertain_items: string[];
+  is_draft?: boolean;
 };
 
 type CandidateCode = {
@@ -138,6 +143,7 @@ type ProcedureObject = {
 
 type ProcedureReview = {
   procedure: ProcedureObject;
+  review_state: string;
   candidates: CandidateCode[];
   match_results: CodeMatchResult[];
   ambiguity_note?: string | null;
@@ -147,6 +153,7 @@ type ProcedureReview = {
 type PipelineReviewResponse = {
   session_id: string;
   status: string;
+  review_state: string;
   stopped_at_stage?: string | null;
   next_action: string;
   role_review?: {
@@ -154,6 +161,7 @@ type PipelineReviewResponse = {
       speaker_id: string;
       role: Role;
       status: SpeakerStatus;
+      review_state: SpeakerStatus;
       utterance_count: number;
       reason?: string | null;
     }[];
@@ -181,8 +189,10 @@ type ExportPayload = {
   warning: string;
 };
 
+type NoteSectionId = "patient_complaint" | "history" | "clinical_findings" | "assessment" | "treatment_plan" | "procedures_note";
+
 type NoteSection = {
-  id: keyof ClinicalNote;
+  id: NoteSectionId;
   title: string;
   lines: NoteSectionLine[];
 };
@@ -371,7 +381,7 @@ export default function ReviewPage() {
   const [productMode, setProductMode] = useState<ProductMode>("clinical_notes");
   const [sessionId, setSessionId] = useState("golden-s1-ui");
   const [transcriptText, setTranscriptText] = useState(sampleTranscript);
-  const [speakers, setSpeakers] = useState(fallbackSpeakers);
+  const [speakers, setSpeakers] = useState<Speaker[]>([]);
   const [selectedCode, setSelectedCode] = useState("FIX-KANAL-2K");
   const [selectedProcedureIndex, setSelectedProcedureIndex] = useState(0);
   const [approved, setApproved] = useState(false);
@@ -389,8 +399,9 @@ export default function ReviewPage() {
   const [liveAsrMessage, setLiveAsrMessage] = useState<string | null>(null);
   const [roleGateMessage, setRoleGateMessage] = useState<string | null>(null);
   const [exportPayload, setExportPayload] = useState<ExportPayload | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const [editableNote, setEditableNote] = useState<ClinicalNote | null>(null);
   const [perioDraft, setPerioDraft] = useState<PerioDraft | null>(null);
-  const didAutoLoad = useRef(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
@@ -403,18 +414,14 @@ export default function ReviewPage() {
   const canAnalyzeTranscript = transcriptDiagnostics.utteranceCount > 0 && transcriptDiagnostics.invalidLines.length === 0;
 
   useEffect(() => {
-    if (didAutoLoad.current) return;
-    didAutoLoad.current = true;
-    void analyzeTranscript();
-  }, []);
-
-  useEffect(() => {
     setResponse(null);
     setExportPayload(null);
     setRoleGateMessage(null);
     setPerioDraft(null);
     setAudioMessage(null);
     setApproved(false);
+    setEditableNote(null);
+    setExportMessage(null);
   }, [productMode]);
 
   useEffect(() => {
@@ -427,19 +434,14 @@ export default function ReviewPage() {
   }, [audioUrl]);
 
   const dentistReview = response?.dentist_review ?? null;
+  const displayedNote = editableNote ?? dentistReview?.note ?? null;
   const procedures = dentistReview?.procedures ?? [];
   const activeProcedure = procedures[selectedProcedureIndex] ?? procedures[0] ?? null;
-  const noteSections = dentistReview
-    ? noteSectionsFromBackend(dentistReview.note)
-    : response
-      ? []
-      : fallbackNoteSections;
-  const checklist = activeProcedure?.match_results[0]?.checklist ?? fallbackChecklist;
-  const candidateCodes = activeProcedure?.candidates.map((candidate) => candidate.code) ?? [
-    "FIX-KANAL-1K",
-    "FIX-KANAL-2K",
-    "FIX-KANAL-3K",
-  ];
+  const noteSections = displayedNote
+    ? noteSectionsFromBackend(displayedNote)
+    : [];
+  const checklist = activeProcedure?.match_results[0]?.checklist ?? [];
+  const candidateCodes = activeProcedure?.candidates.map((candidate) => candidate.code) ?? [];
   const activeTooth = activeProcedure?.procedure.tooth_number_fdi ?? 46;
   const activeProcedureLabel = activeProcedure
     ? procedureLabel(activeProcedure.procedure.procedure_family)
@@ -447,7 +449,7 @@ export default function ReviewPage() {
   const procedureStatus = activeProcedure?.procedure.status ?? "planned";
   const canalStatus = activeProcedure?.procedure.canal_count ?? "unclear";
   const needsRoleReview = response?.next_action === "review_speaker_roles";
-  const hasAnalysisDraft = response?.next_action === "review_note_and_codes" && Boolean(dentistReview);
+  const hasAnalysisDraft = response?.next_action === "review_note_and_codes" && Boolean(displayedNote);
   const issueCount = checklist.filter((item) => item.status !== "found").length +
     speakers.filter((speaker) => speaker.status !== "clear").length;
   const completedChecklist = checklist.filter((item) => item.status === "found").length;
@@ -472,7 +474,7 @@ export default function ReviewPage() {
       : productMode === "perio_dictation" ? "Dikteyi Başlat" : "Görüşmeyi Başlat";
 
   async function runTranscriptAnalysis(sourceUtterances: TranscriptUtterance[]) {
-    return postReviewResponse("/sessions/transcripts/analyze", {
+    return postReviewResponse("/sessions", {
       session_id: sessionId,
       utterances: sourceUtterances,
     });
@@ -487,6 +489,8 @@ export default function ReviewPage() {
     setError(null);
     setApproved(false);
     setExportPayload(null);
+    setEditableNote(null);
+    setExportMessage(null);
     setRoleGateMessage(null);
     setSelectedProcedureIndex(0);
     try {
@@ -508,6 +512,8 @@ export default function ReviewPage() {
     setError(null);
     setApproved(false);
     setExportPayload(null);
+    setEditableNote(null);
+    setExportMessage(null);
     setRoleGateMessage(null);
     setSelectedProcedureIndex(0);
     try {
@@ -541,8 +547,8 @@ export default function ReviewPage() {
     setExportPayload(null);
     setRoleGateMessage(null);
     try {
-      const result = await postReviewResponse("/sessions/transcripts/resume-after-role-review", {
-        session_id: response?.session_id ?? sessionId,
+      const activeSessionId = response?.session_id ?? sessionId;
+      const result = await postReviewResponse(`/sessions/${encodeURIComponent(activeSessionId)}/resume-role-review`, {
         utterances,
         corrected_roles: speakers.map((speaker) => ({
           speaker_id: speaker.id,
@@ -551,6 +557,13 @@ export default function ReviewPage() {
           reason: "Frontend review: hekim rolü onayladı.",
         })),
       });
+      setSpeakers((current) =>
+        current.map((speaker) => ({
+          ...speaker,
+          status: "clear",
+          reason: speaker.reason ?? "Frontend review: hekim rolü onayladı.",
+        })),
+      );
       applyBackendResponse(result);
       setSelectedProcedureIndex(0);
       setRoleGateMessage("Hekim rol onayı kaydedildi; klinik review hazır.");
@@ -562,18 +575,23 @@ export default function ReviewPage() {
   }
 
   async function approveClinicalReview() {
+    if (!hasAnalysisDraft || !displayedNote) {
+      setError("Onay için önce klinik not ve kod taslağı oluşturulmalı.");
+      return;
+    }
     setIsLoading(true);
     setError(null);
     try {
-      const result = await postReviewResponse("/sessions/reviews/approve", {
-        session_id: response?.session_id ?? sessionId,
+      const activeSessionId = response?.session_id ?? sessionId;
+      const result = await postReviewResponse(`/sessions/${encodeURIComponent(activeSessionId)}/approve`, {
         selected_codes: selectedCode ? [selectedCode] : [],
         reviewer_user_id: "frontend-doctor",
         approved: true,
-        approved_note: dentistReview?.note ?? null,
+        approved_note: displayedNote,
       });
       setApproved(true);
       setExportPayload(result.export_payload ?? null);
+      setExportMessage("Hekim onayı kaydedildi; çıktı kopyalama ve indirme için hazır.");
       setResponse((current) => ({
         ...(current ?? result),
         status: result.status,
@@ -812,6 +830,8 @@ export default function ReviewPage() {
 
   function applyBackendResponse(result: PipelineReviewResponse, sourceUtterances: TranscriptUtterance[] = utterances) {
     setResponse(result);
+    setEditableNote(result.dentist_review?.note ?? null);
+    setExportMessage(null);
     if (result.role_review) {
       setSpeakers(
         result.role_review.speakers.map((speaker) => ({
@@ -834,6 +854,65 @@ export default function ReviewPage() {
         speaker.id === id ? { ...speaker, role, status: "clear" } : speaker,
       ),
     );
+  }
+
+  function updateNoteSentence(sectionId: NoteSectionId, lineIndex: number, text: string) {
+    setEditableNote((current) => {
+      if (!current) return current;
+      const section = current[sectionId];
+      return {
+        ...current,
+        [sectionId]: section.map((sentence, index) =>
+          index === lineIndex ? { ...sentence, text } : sentence,
+        ),
+      };
+    });
+  }
+
+  async function copyExportToClipboard() {
+    if (!exportPayload) return;
+    const text = formatExportPayload(exportPayload);
+    await navigator.clipboard.writeText(text);
+    setExportMessage("Export metni panoya kopyalandı.");
+  }
+
+  function downloadExportTxt() {
+    if (!exportPayload) return;
+    const blob = new Blob([formatExportPayload(exportPayload)], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${exportPayload.session_id}-tandela-export.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setExportMessage("TXT dosyası indirildi.");
+  }
+
+  function printExportAsPdf() {
+    if (!exportPayload) return;
+    const printWindow = window.open("", "_blank", "noopener,noreferrer");
+    if (!printWindow) {
+      setExportMessage("PDF yazdırma penceresi açılamadı.");
+      return;
+    }
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>${escapeHtml(exportPayload.session_id)} Tandela Export</title>
+          <style>
+            body { font-family: Arial, sans-serif; padding: 32px; color: #202422; }
+            pre { white-space: pre-wrap; font-size: 13px; line-height: 1.6; }
+          </style>
+        </head>
+        <body>
+          <pre>${escapeHtml(formatExportPayload(exportPayload))}</pre>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+    setExportMessage("PDF için tarayıcı yazdırma penceresi açıldı.");
   }
 
   return (
@@ -1105,9 +1184,14 @@ export default function ReviewPage() {
                   <h3 className="text-lg font-semibold">{section.title}</h3>
                   <div className="mt-3 space-y-3 text-base leading-7 text-[#555a56]">
                     {section.lines.length ? (
-                      section.lines.map((line) => (
-                        <div key={`${section.id}-${line.text}`}>
-                          <p>{line.text}</p>
+                      section.lines.map((line, lineIndex) => (
+                        <div key={`${section.id}-${lineIndex}`}>
+                          <textarea
+                            className="min-h-[72px] w-full resize-y rounded-[8px] border border-black/10 bg-white p-3 text-sm leading-6 text-ink"
+                            value={line.text}
+                            onChange={(event) => updateNoteSentence(section.id, lineIndex, event.target.value)}
+                            aria-label={`${section.title} taslak cümlesi`}
+                          />
                           {line.source_quote ? (
                             <p className="mt-1 text-xs font-semibold leading-5 text-muted">
                               {roleLabels[line.source_role ?? "unknown"]}: {line.source_quote}
@@ -1123,25 +1207,12 @@ export default function ReviewPage() {
               ))}
               </div>
             ) : !response ? (
-              <div className="grid gap-5">
-                {noteSections.map((section) => (
-                  <section key={section.title} className="rounded-[8px] border border-black/10 bg-paper p-4">
-                    <h3 className="text-lg font-semibold">{section.title}</h3>
-                    <div className="mt-3 space-y-3 text-base leading-7 text-[#555a56]">
-                      {section.lines.map((line) => (
-                        <div key={`${section.id}-${line.text}`}>
-                          <p>{line.text}</p>
-                          {line.source_quote ? (
-                            <p className="mt-1 text-xs font-semibold leading-5 text-muted">
-                              {roleLabels[line.source_role ?? "unknown"]}: {line.source_quote}
-                            </p>
-                          ) : null}
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                ))}
-              </div>
+              <section className="rounded-[8px] border border-black/10 bg-paper p-4">
+                <h3 className="text-lg font-semibold">Taslak bekleniyor</h3>
+                <p className="mt-2 text-sm font-semibold leading-6 text-muted">
+                  Transkripti kontrol edip Analiz düğmesine basın.
+                </p>
+              </section>
             ) : null}
 
             {dentistReview?.uncertain_items.length ? (
@@ -1170,6 +1241,38 @@ export default function ReviewPage() {
                 <pre className="mt-4 max-h-[260px] overflow-auto whitespace-pre-wrap rounded-[8px] bg-white p-4 text-sm leading-6 text-ink shadow-line">
                   {formatExportPayload(exportPayload)}
                 </pre>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    className="inline-flex h-10 items-center gap-2 rounded-[8px] bg-ink px-3 text-sm font-semibold text-white"
+                    type="button"
+                    onClick={() => void copyExportToClipboard()}
+                    title="Export metnini kopyala"
+                  >
+                    <Copy className="h-4 w-4" aria-hidden="true" />
+                    Kopyala
+                  </button>
+                  <button
+                    className="inline-flex h-10 items-center gap-2 rounded-[8px] border border-black/10 bg-white px-3 text-sm font-semibold"
+                    type="button"
+                    onClick={downloadExportTxt}
+                    title="TXT indir"
+                  >
+                    <Download className="h-4 w-4" aria-hidden="true" />
+                    TXT
+                  </button>
+                  <button
+                    className="inline-flex h-10 items-center gap-2 rounded-[8px] border border-black/10 bg-white px-3 text-sm font-semibold"
+                    type="button"
+                    onClick={printExportAsPdf}
+                    title="PDF olarak yazdır"
+                  >
+                    <Printer className="h-4 w-4" aria-hidden="true" />
+                    PDF
+                  </button>
+                </div>
+                {exportMessage ? (
+                  <p className="mt-3 text-sm font-semibold leading-6 text-teal">{exportMessage}</p>
+                ) : null}
                 <p className="mt-3 text-sm font-semibold leading-6 text-muted">{exportPayload.warning}</p>
               </section>
             ) : null}
@@ -1308,7 +1411,7 @@ export default function ReviewPage() {
                 type="button"
                 title="Review onayla"
                 onClick={() => void approveClinicalReview()}
-                disabled={isLoading}
+                disabled={isLoading || !hasAnalysisDraft}
                 className="inline-flex items-center gap-2 rounded-[8px] bg-ink px-4 py-3 text-sm font-semibold text-white disabled:opacity-55"
               >
                 <Check className="h-4 w-4" aria-hidden="true" />
@@ -1518,6 +1621,15 @@ function formatExportPayload(payload: ExportPayload) {
     "",
     payload.clinical_note_text || "Klinik not metni yok.",
   ].join("\n");
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function noteSectionsFromBackend(note: ClinicalNote): NoteSection[] {
