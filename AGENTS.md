@@ -17,6 +17,7 @@ düzeltir, onaylar. Ürün teşhis koymaz, tedavi önermez, otomatik kayıt yapm
 ### Product lines
 
 Detaylı ürün tanımı: `docs/product-lines.md`.
+MVP fazları ve mevcut durum: `docs/mvp-roadmap.md`.
 
 1. **Hasta toplantısı / Klinik notlar + işlem kodları:** Hasta görüşmesini dinler,
    konuşmacıları ayırır, klinik not taslağı üretir, işlem/kod review ve checklist
@@ -134,7 +135,7 @@ LLM çağrıları da aynı veri kısıtlarına (AB/DPA/no-training) tabidir.
 
 `clinics, users, patients, sessions, transcripts, clinical_notes,
 procedure_codes, code_suggestions, documentation_checks, audit_logs`.
-Tam şema: `docs/data-model.md` (henüz yazılmadı).
+MVP persistence özeti: `docs/data-model.md`.
 
 ---
 
