@@ -9,12 +9,10 @@ from sqlalchemy import select
 from app.api.session_pipeline import ExportAuditOut, ExportPayloadOut
 from app.models.database import create_database_engine, create_session_factory, init_database
 from app.models.session_records import (
-    AuditLogRecord,
-    ClinicalNoteRecord,
-    ExportPayloadRecord,
-    ReviewDecisionRecord,
-    SessionRecord,
-    TranscriptRecord,
+    AuditLog,
+    ClinicalNote,
+    Session,
+    Transcript,
 )
 from app.pipeline.types import ClinicalNoteDraft, DentistRole, NoteSentence
 from app.repositories.session_repository import SessionRepository
@@ -76,32 +74,36 @@ class SessionRepositoryTests(unittest.TestCase):
             )
             db.commit()
 
-            session = db.get(SessionRecord, "persist-s1")
+            session = db.get(Session, "persist-s1")
             self.assertIsNotNone(session)
             self.assertEqual(session.status, "approved")
             self.assertEqual(session.clinic_id, "clinic-1")
-            self.assertEqual(db.scalar(select(TranscriptRecord).where(TranscriptRecord.session_id == "persist-s1")).source, "test")
-            self.assertEqual(db.scalar(select(ClinicalNoteRecord).where(ClinicalNoteRecord.session_id == "persist-s1")).status, "draft")
-            self.assertEqual(
-                db.scalar(select(ReviewDecisionRecord).where(ReviewDecisionRecord.session_id == "persist-s1")).selected_codes_json,
-                ["FIX-KANAL-2K"],
-            )
-            self.assertEqual(
-                db.scalar(select(ExportPayloadRecord).where(ExportPayloadRecord.session_id == "persist-s1")).payload_json["selected_codes"],
-                ["FIX-KANAL-2K"],
-            )
+            self.assertEqual(db.scalar(select(Transcript).where(Transcript.session_id == "persist-s1")).source, "test")
+            note_record = db.scalar(select(ClinicalNote).where(ClinicalNote.session_id == "persist-s1"))
+            self.assertEqual(note_record.status, "draft")
+            self.assertIn("clinical_findings", note_record.draft_json)
             audit_actions = [
                 row.action
-                for row in db.scalars(select(AuditLogRecord).where(AuditLogRecord.session_id == "persist-s1"))
+                for row in db.scalars(select(AuditLog).where(AuditLog.session_id == "persist-s1"))
             ]
             self.assertIn("transcript_saved", audit_actions)
             self.assertIn("clinical_note_saved", audit_actions)
             self.assertIn("doctor_review_approved", audit_actions)
+            self.assertIn("export_payload_created", audit_actions)
             audit_actors = {
-                row.actor_user_id
-                for row in db.scalars(select(AuditLogRecord).where(AuditLogRecord.session_id == "persist-s1"))
+                row.user_id
+                for row in db.scalars(select(AuditLog).where(AuditLog.session_id == "persist-s1"))
             }
             self.assertIn("doctor-1", audit_actors)
+            export_audit = db.scalar(
+                select(AuditLog).where(
+                    AuditLog.session_id == "persist-s1",
+                    AuditLog.action == "export_payload_created",
+                )
+            )
+            self.assertEqual(export_audit.metadata_json["selected_codes"], ["FIX-KANAL-2K"])
+            self.assertIsNotNone(repo.get_session("persist-s1", clinic_id="clinic-1"))
+            self.assertIsNone(repo.get_session("persist-s1", clinic_id="other-clinic"))
         finally:
             db.close()
 

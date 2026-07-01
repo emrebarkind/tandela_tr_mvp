@@ -42,11 +42,6 @@ def create_session_factory(engine: Engine) -> sessionmaker:
 
 
 def init_database(engine: Optional[Engine] = None) -> None:
-    from app.models.session_records import AuditLogRecord  # noqa: F401
-    from app.models.session_records import ClinicalNoteRecord  # noqa: F401
-    from app.models.session_records import ExportPayloadRecord  # noqa: F401
-    from app.models.session_records import ReviewDecisionRecord  # noqa: F401
-    from app.models.session_records import SessionRecord  # noqa: F401
-    from app.models.session_records import TranscriptRecord  # noqa: F401
+    from app.models import session_records  # noqa: F401
 
     Base.metadata.create_all(bind=engine or create_database_engine())

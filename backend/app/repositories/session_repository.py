@@ -5,22 +5,76 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session as OrmSession
 
 from app.models.session_records import (
-    AuditLogRecord,
-    ClinicalNoteRecord,
-    ExportPayloadRecord,
-    ReviewDecisionRecord,
-    SessionRecord,
-    TranscriptRecord,
+    AuditLog,
+    ClinicalNote,
+    Clinic,
+    CodeSuggestion,
+    Patient,
+    ProcedureCode,
+    Session,
+    Transcript,
+    User,
 )
-from app.pipeline.types import ClinicalNoteDraft
+from app.pipeline.types import ClinicalNoteDraft, CodeSuggestionBundle, PipelineResult, PipelineStatus
 
 
 class SessionRepository:
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: OrmSession) -> None:
         self.db = db
+
+    def ensure_clinic(self, clinic_id: str, *, name: Optional[str] = None) -> Clinic:
+        record = self.db.get(Clinic, clinic_id)
+        if record is None:
+            record = Clinic(id=clinic_id, name=name or clinic_id)
+            self.db.add(record)
+            self.db.flush()
+        return record
+
+    def ensure_user(
+        self,
+        user_id: str,
+        *,
+        clinic_id: str,
+        role: str = "dentist",
+        email: Optional[str] = None,
+    ) -> User:
+        self.ensure_clinic(clinic_id)
+        record = self.db.get(User, user_id)
+        if record is None:
+            record = User(
+                id=user_id,
+                clinic_id=clinic_id,
+                role=role,
+                email=email or f"{user_id}@local.tandela",
+                password_hash="",
+            )
+            self.db.add(record)
+            self.db.flush()
+        return record
+
+    def ensure_patient(
+        self,
+        patient_id: str,
+        *,
+        clinic_id: str,
+        external_id: Optional[str] = None,
+        initials: Optional[str] = None,
+    ) -> Patient:
+        self.ensure_clinic(clinic_id)
+        record = self.db.get(Patient, patient_id)
+        if record is None:
+            record = Patient(
+                id=patient_id,
+                clinic_id=clinic_id,
+                external_id=external_id,
+                initials=initials,
+            )
+            self.db.add(record)
+            self.db.flush()
+        return record
 
     def upsert_session(
         self,
@@ -28,56 +82,110 @@ class SessionRepository:
         *,
         status: str,
         current_stage: Optional[str] = None,
-        clinic_id: Optional[str] = None,
-        patient_ref: Optional[str] = None,
-    ) -> SessionRecord:
-        record = self.db.get(SessionRecord, session_id)
+        clinic_id: str,
+        patient_id: Optional[str] = None,
+        dentist_id: Optional[str] = None,
+    ) -> Session:
+        self.ensure_clinic(clinic_id)
+        if dentist_id is not None:
+            self.ensure_user(dentist_id, clinic_id=clinic_id)
+        record = self.db.get(Session, session_id)
+        mapped_status = _session_status(status)
         if record is None:
-            record = SessionRecord(
+            record = Session(
                 id=session_id,
                 clinic_id=clinic_id,
-                patient_ref=patient_ref,
-                status=status,
+                patient_id=patient_id,
+                dentist_id=dentist_id,
+                status=mapped_status,
                 current_stage=current_stage,
             )
             self.db.add(record)
         else:
-            record.status = status
+            if record.clinic_id != clinic_id:
+                raise PermissionError("Session farklı kliniğe ait.")
+            record.status = mapped_status
             record.current_stage = current_stage
-            if clinic_id is not None:
-                record.clinic_id = clinic_id
-            if patient_ref is not None:
-                record.patient_ref = patient_ref
+            if patient_id is not None:
+                record.patient_id = patient_id
+            if dentist_id is not None:
+                record.dentist_id = dentist_id
         self.db.flush()
         return record
+
+    def save_pipeline_result(
+        self,
+        result: PipelineResult,
+        *,
+        clinic_id: str,
+        actor_user_id: Optional[str],
+        transcript_source: str,
+    ) -> Session:
+        self.upsert_session(
+            result.session_id,
+            status=result.status.value,
+            current_stage=result.stopped_at_stage,
+            clinic_id=clinic_id,
+            dentist_id=actor_user_id,
+        )
+        if result.speaker_labelled_transcript is not None:
+            self.save_transcript(
+                result.session_id,
+                [
+                    {
+                        "speaker_id": utterance.speaker_id,
+                        "text": utterance.text,
+                        "start_sec": utterance.start_sec,
+                        "end_sec": utterance.end_sec,
+                    }
+                    for utterance in result.speaker_labelled_transcript.utterances
+                ],
+                source=transcript_source,
+                clinic_id=clinic_id,
+                actor_user_id=actor_user_id,
+            )
+        if result.clinical_note is not None:
+            self.save_clinical_note(
+                result.session_id,
+                result.clinical_note,
+                clinic_id=clinic_id,
+                actor_user_id=actor_user_id,
+            )
+        if result.code_suggestions:
+            self.save_code_suggestions(result.session_id, result.code_suggestions, clinic_id=clinic_id)
+        return self.latest_session(result.session_id, clinic_id=clinic_id)
 
     def save_transcript(
         self,
         session_id: str,
         utterances: list[dict],
         *,
-        source: str = "transcript",
-        clinic_id: Optional[str] = None,
+        source: str = "voice",
+        clinic_id: str,
         actor_user_id: Optional[str] = None,
-    ) -> TranscriptRecord:
+    ) -> Transcript:
         self.upsert_session(
             session_id,
-            status="transcript_received",
+            status="draft",
             current_stage="transcript",
             clinic_id=clinic_id,
+            dentist_id=actor_user_id,
         )
-        record = TranscriptRecord(
+        record = Transcript(
             session_id=session_id,
             source=source,
             utterances_json=utterances,
         )
         self.db.add(record)
-        self._audit(
+        self.add_audit_log(
+            user_id=actor_user_id,
             session_id=session_id,
+            clinic_id=clinic_id,
             action="transcript_saved",
-            source=source,
-            payload={"utterance_count": len(utterances)},
-            actor_user_id=actor_user_id,
+            entity_type="transcript",
+            entity_id=None,
+            source="voice" if source.startswith("audio") else "manual",
+            metadata_json={"utterance_count": len(utterances), "transcript_source": source},
         )
         self.db.flush()
         return record
@@ -88,31 +196,70 @@ class SessionRepository:
         note: ClinicalNoteDraft,
         *,
         status: str = "draft",
-        clinic_id: Optional[str] = None,
+        clinic_id: str,
         actor_user_id: Optional[str] = None,
-    ) -> ClinicalNoteRecord:
+        model_version: Optional[str] = None,
+    ) -> ClinicalNote:
         self.upsert_session(
             session_id,
-            status="awaiting_dentist_review",
+            status="approved" if status == "approved" else "draft",
             current_stage="dentist_review",
             clinic_id=clinic_id,
+            dentist_id=actor_user_id,
         )
-        record = ClinicalNoteRecord(
+        note_json = note.model_dump(mode="json")
+        record = ClinicalNote(
             session_id=session_id,
-            note_json=note.model_dump(mode="json"),
-            note_text=_note_text(note),
+            draft_json=note_json,
+            approved_json=note_json if status == "approved" else None,
             status=status,
+            model_version=model_version,
         )
         self.db.add(record)
-        self._audit(
+        self.add_audit_log(
+            user_id=actor_user_id,
             session_id=session_id,
-            action="clinical_note_saved",
-            source="ai",
-            payload={"status": status},
-            actor_user_id=actor_user_id,
+            clinic_id=clinic_id,
+            action="clinical_note_saved" if status == "draft" else "clinical_note_approved",
+            entity_type="clinical_note",
+            entity_id=None,
+            source="ai" if status == "draft" else "manual",
+            metadata_json={"status": status},
         )
         self.db.flush()
         return record
+
+    def save_code_suggestions(
+        self,
+        session_id: str,
+        bundles: list[CodeSuggestionBundle],
+        *,
+        clinic_id: str,
+    ) -> list[CodeSuggestion]:
+        self._require_session_in_clinic(session_id, clinic_id)
+        records: list[CodeSuggestion] = []
+        for bundle in bundles:
+            explanations_by_code = {explanation.code: explanation for explanation in bundle.explanations}
+            states_by_code = {result.code: result.match_state.value for result in bundle.match_results}
+            for candidate in bundle.candidates:
+                procedure_code = self._upsert_procedure_code(
+                    code=candidate.code,
+                    title=candidate.procedure_name,
+                    category=candidate.category,
+                    source_year=candidate.source_version,
+                )
+                explanation = explanations_by_code.get(candidate.code)
+                record = CodeSuggestion(
+                    session_id=session_id,
+                    procedure_code_id=procedure_code.id,
+                    match_state=states_by_code.get(candidate.code, "needs_review"),
+                    explanation=explanation.fit_reason if explanation is not None else None,
+                    accepted_by_user=False,
+                )
+                self.db.add(record)
+                records.append(record)
+        self.db.flush()
+        return records
 
     def save_review_approval(
         self,
@@ -122,84 +269,163 @@ class SessionRepository:
         selected_codes: list[str],
         reviewer_user_id: Optional[str],
         export_payload: Optional[Any],
-        clinic_id: Optional[str] = None,
-    ) -> ReviewDecisionRecord:
+        clinic_id: str,
+    ) -> None:
         self.upsert_session(
             session_id,
-            status="approved" if approved else "review_rejected",
+            status="approved" if approved else "draft",
             current_stage="ready_for_export" if approved else "dentist_review",
             clinic_id=clinic_id,
+            dentist_id=reviewer_user_id,
         )
-        decision = ReviewDecisionRecord(
+        if selected_codes:
+            self._mark_accepted_codes(session_id, selected_codes, clinic_id=clinic_id)
+        self.add_audit_log(
+            user_id=reviewer_user_id,
             session_id=session_id,
-            reviewer_user_id=reviewer_user_id,
-            approved=approved,
-            selected_codes_json=selected_codes,
-            decision_json={
-                "approved": approved,
-                "selected_codes": selected_codes,
-                "reviewer_user_id": reviewer_user_id,
-            },
-        )
-        self.db.add(decision)
-        if export_payload is not None:
-            self.db.add(
-                ExportPayloadRecord(
-                    session_id=session_id,
-                    payload_json=export_payload.model_dump(mode="json"),
-                )
-            )
-        self._audit(
-            session_id=session_id,
-            actor_user_id=reviewer_user_id,
+            clinic_id=clinic_id,
             action="doctor_review_approved" if approved else "doctor_review_rejected",
+            entity_type="session",
+            entity_id=session_id,
             source="manual",
-            payload={"selected_codes": selected_codes},
+            metadata_json={"selected_codes": selected_codes},
         )
+        if approved and export_payload is not None:
+            self.add_audit_log(
+                user_id=reviewer_user_id,
+                session_id=session_id,
+                clinic_id=clinic_id,
+                action="export_payload_created",
+                entity_type="export_payload",
+                entity_id=session_id,
+                source="manual",
+                metadata_json=export_payload.model_dump(mode="json"),
+            )
         self.db.flush()
-        return decision
 
-    def latest_session(self, session_id: str) -> Optional[SessionRecord]:
-        return self.db.scalar(select(SessionRecord).where(SessionRecord.id == session_id))
-
-    def _audit(
+    def add_audit_log(
         self,
         *,
+        user_id: Optional[str],
         session_id: str,
+        clinic_id: str,
         action: str,
+        entity_type: str,
+        entity_id: Optional[str],
         source: str,
-        payload: dict,
-        actor_user_id: Optional[str] = None,
-    ) -> None:
-        self.db.add(
-            AuditLogRecord(
-                session_id=session_id,
-                actor_user_id=actor_user_id,
-                action=action,
-                source=source,
-                payload_json=payload,
-            )
+        metadata_json: dict,
+    ) -> AuditLog:
+        self._require_session_in_clinic(session_id, clinic_id)
+        if user_id is not None:
+            self.ensure_user(user_id, clinic_id=clinic_id)
+        record = AuditLog(
+            user_id=user_id,
+            session_id=session_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            source=source,
+            metadata_json=metadata_json,
         )
+        self.db.add(record)
+        self.db.flush()
+        return record
+
+    def latest_session(self, session_id: str, *, clinic_id: Optional[str] = None) -> Optional[Session]:
+        stmt = select(Session).where(Session.id == session_id)
+        if clinic_id is not None:
+            stmt = stmt.where(Session.clinic_id == clinic_id)
+        return self.db.scalar(stmt)
+
+    def get_session(self, session_id: str, *, clinic_id: str) -> Optional[dict]:
+        record = self.latest_session(session_id, clinic_id=clinic_id)
+        if record is None:
+            return None
+        return {
+            "id": record.id,
+            "clinic_id": record.clinic_id,
+            "patient_id": record.patient_id,
+            "dentist_id": record.dentist_id,
+            "status": record.status,
+            "current_stage": record.current_stage,
+            "started_at": record.started_at.isoformat() if record.started_at else None,
+            "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+            "clinical_notes": [
+                {
+                    "id": note.id,
+                    "status": note.status,
+                    "draft_json": note.draft_json,
+                    "approved_json": note.approved_json,
+                    "model_version": note.model_version,
+                    "created_at": note.created_at.isoformat(),
+                }
+                for note in record.clinical_notes
+            ],
+            "code_suggestions": [
+                {
+                    "id": suggestion.id,
+                    "code": suggestion.procedure_code.code if suggestion.procedure_code else None,
+                    "match_state": suggestion.match_state,
+                    "explanation": suggestion.explanation,
+                    "accepted_by_user": suggestion.accepted_by_user,
+                }
+                for suggestion in record.code_suggestions
+            ],
+            "audit_logs": [
+                {
+                    "id": audit.id,
+                    "user_id": audit.user_id,
+                    "action": audit.action,
+                    "entity_type": audit.entity_type,
+                    "entity_id": audit.entity_id,
+                    "source": audit.source,
+                    "timestamp": audit.timestamp.isoformat(),
+                    "metadata_json": audit.metadata_json,
+                }
+                for audit in record.audit_logs
+            ],
+        }
+
+    def _upsert_procedure_code(
+        self,
+        *,
+        code: str,
+        title: str,
+        category: str,
+        source_year: str,
+    ) -> ProcedureCode:
+        record = self.db.scalar(select(ProcedureCode).where(ProcedureCode.code == code))
+        if record is None:
+            record = ProcedureCode(
+                code=code,
+                title=title,
+                category=category,
+                source_year=source_year,
+            )
+            self.db.add(record)
+            self.db.flush()
+        return record
+
+    def _mark_accepted_codes(self, session_id: str, selected_codes: list[str], *, clinic_id: str) -> None:
+        self._require_session_in_clinic(session_id, clinic_id)
+        stmt = (
+            select(CodeSuggestion)
+            .join(ProcedureCode, CodeSuggestion.procedure_code_id == ProcedureCode.id)
+            .where(CodeSuggestion.session_id == session_id, ProcedureCode.code.in_(selected_codes))
+        )
+        for suggestion in self.db.scalars(stmt):
+            suggestion.accepted_by_user = True
+
+    def _require_session_in_clinic(self, session_id: str, clinic_id: str) -> Session:
+        record = self.latest_session(session_id, clinic_id=clinic_id)
+        if record is None:
+            raise KeyError(session_id)
+        return record
 
 
-def _note_text(note: ClinicalNoteDraft) -> str:
-    sections = [
-        ("Hasta şikayeti", note.patient_complaint),
-        ("Geçmiş", note.history),
-        ("Klinik bulgular", note.clinical_findings),
-        ("Değerlendirme", note.assessment),
-        ("Tedavi planı", note.treatment_plan),
-        ("İşlem notu", note.procedures_note),
-    ]
-    lines: list[str] = []
-    for title, sentences in sections:
-        if not sentences:
-            continue
-        lines.append(title)
-        lines.extend(f"- {sentence.text}" for sentence in sentences)
-        lines.append("")
-    if note.uncertain_items:
-        lines.append("Belirsiz / hekim review maddeleri")
-        lines.extend(f"- {item}" for item in note.uncertain_items)
-        lines.append("")
-    return "\n".join(lines).strip()
+def _session_status(status: str) -> str:
+    if status in (PipelineStatus.APPROVED.value, "approved"):
+        return "approved"
+    if status in (PipelineStatus.EXPORTED.value, "exported"):
+        return "exported"
+    return "draft"

@@ -1,4 +1,4 @@
-"""Session persistence models for the MVP workflow."""
+"""SQLAlchemy persistence models for Tandela MVP sessions."""
 
 from __future__ import annotations
 
@@ -15,13 +15,56 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class SessionRecord(Base):
+class Clinic(Base):
+    __tablename__ = "clinics"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    users: Mapped[list["User"]] = relationship(back_populates="clinic")
+    patients: Mapped[list["Patient"]] = relationship(back_populates="clinic")
+    sessions: Mapped[list["Session"]] = relationship(back_populates="clinic")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    clinic_id: Mapped[str] = mapped_column(ForeignKey("clinics.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    clinic: Mapped[Clinic] = relationship(back_populates="users")
+    sessions: Mapped[list["Session"]] = relationship(back_populates="dentist")
+    audit_logs: Mapped[list["AuditLog"]] = relationship(back_populates="user")
+
+
+class Patient(Base):
+    __tablename__ = "patients"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    clinic_id: Mapped[str] = mapped_column(ForeignKey("clinics.id"), nullable=False, index=True)
+    external_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    initials: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    clinic: Mapped[Clinic] = relationship(back_populates="patients")
+    sessions: Mapped[list["Session"]] = relationship(back_populates="patient")
+
+
+class Session(Base):
     __tablename__ = "sessions"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    clinic_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
-    patient_ref: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    status: Mapped[str] = mapped_column(String(64), default="created", nullable=False, index=True)
+    clinic_id: Mapped[str] = mapped_column(ForeignKey("clinics.id"), nullable=False, index=True)
+    patient_id: Mapped[Optional[str]] = mapped_column(ForeignKey("patients.id"), nullable=True, index=True)
+    dentist_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     current_stage: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -31,90 +74,90 @@ class SessionRecord(Base):
         nullable=False,
     )
 
-    transcripts: Mapped[list["TranscriptRecord"]] = relationship(
-        back_populates="session",
-        cascade="all, delete-orphan",
-    )
-    clinical_notes: Mapped[list["ClinicalNoteRecord"]] = relationship(
-        back_populates="session",
-        cascade="all, delete-orphan",
-    )
-    review_decisions: Mapped[list["ReviewDecisionRecord"]] = relationship(
-        back_populates="session",
-        cascade="all, delete-orphan",
-    )
-    export_payloads: Mapped[list["ExportPayloadRecord"]] = relationship(
-        back_populates="session",
-        cascade="all, delete-orphan",
-    )
-    audit_logs: Mapped[list["AuditLogRecord"]] = relationship(
-        back_populates="session",
-        cascade="all, delete-orphan",
-    )
+    clinic: Mapped[Clinic] = relationship(back_populates="sessions")
+    patient: Mapped[Optional[Patient]] = relationship(back_populates="sessions")
+    dentist: Mapped[Optional[User]] = relationship(back_populates="sessions")
+    transcripts: Mapped[list["Transcript"]] = relationship(back_populates="session", cascade="all, delete-orphan")
+    clinical_notes: Mapped[list["ClinicalNote"]] = relationship(back_populates="session", cascade="all, delete-orphan")
+    code_suggestions: Mapped[list["CodeSuggestion"]] = relationship(back_populates="session", cascade="all, delete-orphan")
+    audit_logs: Mapped[list["AuditLog"]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
 
-class TranscriptRecord(Base):
+class Transcript(Base):
     __tablename__ = "transcripts"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False, index=True)
-    source: Mapped[str] = mapped_column(String(64), default="audio", nullable=False)
+    source: Mapped[str] = mapped_column(String(64), default="voice", nullable=False)
     utterances_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
-    session: Mapped[SessionRecord] = relationship(back_populates="transcripts")
+    session: Mapped[Session] = relationship(back_populates="transcripts")
 
 
-class ClinicalNoteRecord(Base):
+class ClinicalNote(Base):
     __tablename__ = "clinical_notes"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False, index=True)
-    note_json: Mapped[dict] = mapped_column(JSON, nullable=False)
-    note_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    status: Mapped[str] = mapped_column(String(64), default="draft", nullable=False)
+    draft_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    approved_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False, index=True)
+    model_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
-    session: Mapped[SessionRecord] = relationship(back_populates="clinical_notes")
+    session: Mapped[Session] = relationship(back_populates="clinical_notes")
 
 
-class ReviewDecisionRecord(Base):
-    __tablename__ = "review_decisions"
+class ProcedureCode(Base):
+    __tablename__ = "procedure_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    category: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_year: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    suggestions: Mapped[list["CodeSuggestion"]] = relationship(back_populates="procedure_code")
+
+
+class CodeSuggestion(Base):
+    __tablename__ = "code_suggestions"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False, index=True)
-    reviewer_user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
-    approved: Mapped[bool] = mapped_column(default=False, nullable=False)
-    selected_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    decision_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    procedure_code_id: Mapped[Optional[int]] = mapped_column(ForeignKey("procedure_codes.id"), nullable=True, index=True)
+    match_state: Mapped[str] = mapped_column(String(96), nullable=False)
+    explanation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    accepted_by_user: Mapped[bool] = mapped_column(default=False, nullable=False)
 
-    session: Mapped[SessionRecord] = relationship(back_populates="review_decisions")
-
-
-class ExportPayloadRecord(Base):
-    __tablename__ = "export_payloads"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False, index=True)
-    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-
-    session: Mapped[SessionRecord] = relationship(back_populates="export_payloads")
+    session: Mapped[Session] = relationship(back_populates="code_suggestions")
+    procedure_code: Mapped[Optional[ProcedureCode]] = relationship(back_populates="suggestions")
 
 
-class AuditLogRecord(Base):
+class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"), nullable=False, index=True)
-    actor_user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
     action: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    source: Mapped[str] = mapped_column(String(64), default="system", nullable=False)
-    payload_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
-    session: Mapped[SessionRecord] = relationship(back_populates="audit_logs")
+    user: Mapped[Optional[User]] = relationship(back_populates="audit_logs")
+    session: Mapped[Session] = relationship(back_populates="audit_logs")
 
 
-Index("ix_sessions_clinic_status", SessionRecord.clinic_id, SessionRecord.status)
+Index("ix_patients_clinic_external_id", Patient.clinic_id, Patient.external_id)
+Index("ix_sessions_clinic_status", Session.clinic_id, Session.status)
+Index("ix_audit_logs_session_timestamp", AuditLog.session_id, AuditLog.timestamp)
+
+# Backward-compatible names for existing API/repository code.
+SessionRecord = Session
+TranscriptRecord = Transcript
+ClinicalNoteRecord = ClinicalNote
+AuditLogRecord = AuditLog

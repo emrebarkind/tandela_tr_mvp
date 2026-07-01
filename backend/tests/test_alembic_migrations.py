@@ -23,11 +23,14 @@ class AlembicMigrationTests(unittest.TestCase):
             engine = create_engine(f"sqlite:///{db_path}", future=True)
             try:
                 tables = set(inspect(engine).get_table_names())
+                self.assertIn("clinics", tables)
+                self.assertIn("users", tables)
+                self.assertIn("patients", tables)
                 self.assertIn("sessions", tables)
                 self.assertIn("transcripts", tables)
                 self.assertIn("clinical_notes", tables)
-                self.assertIn("review_decisions", tables)
-                self.assertIn("export_payloads", tables)
+                self.assertIn("procedure_codes", tables)
+                self.assertIn("code_suggestions", tables)
                 self.assertIn("audit_logs", tables)
             finally:
                 engine.dispose()
