@@ -91,6 +91,15 @@ class RoleReviewSpeakerOut(BaseModel):
     reason: Optional[str] = None
 
 
+class AudioProcessingReviewOut(BaseModel):
+    status: str
+    raw_audio_deleted: bool
+    provider_status: str
+    message: str
+    warnings: list[str] = Field(default_factory=list)
+    transcript: Optional[SpeakerLabelledTranscript] = None
+
+
 class RoleReviewOut(BaseModel):
     speakers: list[RoleReviewSpeakerOut] = Field(default_factory=list)
     manual_review_required: bool = True
@@ -138,6 +147,7 @@ class PipelineReviewResponse(BaseModel):
     role_review: Optional[RoleReviewOut] = None
     dentist_review: Optional[DentistReviewOut] = None
     export_payload: Optional[ExportPayloadOut] = None
+    audio_processing: Optional[AudioProcessingReviewOut] = None
 
 
 _SESSION_STORE: dict[str, SessionState] = {}
@@ -567,7 +577,7 @@ def _continue_after_role_assignment(
     try:
         facts = stages.extract_clinical_facts(role_labelled, llm_provider)
         note = stages.generate_clinical_note(facts, llm_provider)
-        procedures = stages.extract_procedures(facts)
+        procedures = stages.extract_dental_chart_commands(facts, llm_provider)
         code_suggestions = stages.match_codes_and_checklist(procedures, facts, llm_provider)
     except SourceRoleInvariantViolation:
         result.status = PipelineStatus.NEEDS_DENTIST_ROLE_REVIEW

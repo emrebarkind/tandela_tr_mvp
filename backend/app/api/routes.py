@@ -15,6 +15,7 @@ from app.api.audio_pipeline import (
 )
 from app.api.auth import AuthContext, get_auth_context
 from app.api.session_pipeline import (
+    AudioProcessingReviewOut,
     ApproveReviewRequest,
     PipelineReviewResponse,
     ResumeRoleReviewRequest,
@@ -220,6 +221,46 @@ def approve_session_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return to_review_response(result)
+
+
+@router.post("/{session_id}/audio", response_model=PipelineReviewResponse)
+def session_audio_endpoint(
+    session_id: str,
+    audio: UploadFile = File(...),
+    audio_provider: AudioProcessingProvider = Depends(get_audio_processing_provider),
+    llm_provider: LLMProvider = Depends(get_llm_provider),
+    auth: AuthContext = Depends(get_auth_context),
+) -> PipelineReviewResponse:
+    _ = auth
+    audio_result = process_uploaded_audio(session_id, audio, audio_provider)
+    audio_out = AudioProcessingReviewOut(
+        status=audio_result.status,
+        raw_audio_deleted=audio_result.raw_audio_deleted,
+        provider_status=audio_result.provider_status,
+        message=audio_result.message,
+        warnings=audio_result.warnings,
+        transcript=audio_result.transcript,
+    )
+    if audio_result.transcript is None or audio_result.status != "transcript_ready":
+        raise HTTPException(
+            status_code=503,
+            detail=audio_out.model_dump(mode="json"),
+        )
+
+    request = TranscriptAnalyzeRequest(
+        session_id=session_id,
+        utterances=[
+            {
+                "speaker_id": utterance.speaker_id,
+                "text": utterance.text,
+                "start_sec": utterance.start_sec,
+                "end_sec": utterance.end_sec,
+            }
+            for utterance in audio_result.transcript.utterances
+        ],
+    )
+    result = create_session_from_transcript(request, llm_provider)
+    return to_review_response(result).model_copy(update={"audio_processing": audio_out})
 
 
 @router.post("/audio/process", response_model=AudioProcessResponse)

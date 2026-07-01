@@ -10,12 +10,14 @@ from app.pipeline.types import (
     ChecklistItemStatus,
     ClinicalFact,
     ClinicalFactsBundle,
+    DentalCondition,
     DentistRole,
     FactCategory,
     ProcedureStatus,
     RoleStatus,
     SpeakerLabelledTranscript,
     SurfaceCount,
+    ToothSurface,
     Utterance,
 )
 from app.providers.gemini_audio_provider import normalize_gemini_audio_response
@@ -211,6 +213,41 @@ class PipelineContractTests(unittest.TestCase):
             "FIX-KANAL-3K",
         })
         self.assertTrue(bundles[0].dentist_must_choose)
+
+    def test_dental_chart_extraction_adds_surface_and_condition_without_guessing(self) -> None:
+        facts = ClinicalFactsBundle(
+            session_id="chart-enrichment",
+            facts=[
+                ClinicalFact(
+                    category=FactCategory.PROCEDURES,
+                    text="46 numarada MOD kompozit dolgu planlandı.",
+                    source_quote="46 numarada MOD kompozit dolgu planlandı",
+                    source_role=DentistRole.DENTIST,
+                    source_speaker="A",
+                    tooth_number_fdi=46,
+                    status=ProcedureStatus.PLANNED,
+                )
+            ],
+        )
+        llm = ScriptedLLM(
+            [
+                [
+                    {
+                        "tooth_fdi": 46,
+                        "surfaces": ["M", "O", "D"],
+                        "condition": "composite",
+                        "status": "planned",
+                        "source_quote": "46 numarada MOD kompozit dolgu planlandı",
+                    }
+                ]
+            ]
+        )
+
+        procedures = stages.extract_dental_chart_commands(facts, llm)
+
+        self.assertEqual(procedures[0].tooth_number_fdi, 46)
+        self.assertEqual(procedures[0].surfaces, [ToothSurface.MESIAL, ToothSurface.OCCLUSAL, ToothSurface.DISTAL])
+        self.assertEqual(procedures[0].condition, DentalCondition.COMPOSITE)
 
     def test_code_explanation_llm_cannot_invent_candidate_code(self) -> None:
         facts = ClinicalFactsBundle(

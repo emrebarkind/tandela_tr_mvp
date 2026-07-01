@@ -278,6 +278,28 @@ class SurfaceCount(str, Enum):
     UNCLEAR = "unclear"
 
 
+class ToothSurface(str, Enum):
+    OCCLUSAL = "O"
+    MESIAL = "M"
+    DISTAL = "D"
+    VESTIBULAR = "V"
+    LINGUAL = "L"
+
+
+class DentalCondition(str, Enum):
+    CARIES = "caries"
+    COMPOSITE = "composite"
+    AMALGAM = "amalgam"
+    INLAY = "inlay"
+    ONLAY = "onlay"
+    CROWN = "crown"
+    BRIDGE = "bridge"
+    PROSTHESIS = "prosthesis"
+    IMPLANT = "implant"
+    RCT = "rct"
+    MISSING = "missing"
+
+
 class CanalCount(str, Enum):
     ONE_CANAL = "one_canal"
     TWO_CANAL = "two_canal"
@@ -289,6 +311,8 @@ class ProcedureObject(BaseModel):
     procedure_family: str  # örn. "kompozit_dolgu", "kanal_tedavisi", "dis_cekimi"
     tooth_number_fdi: Optional[int] = None  # doğrulanmış FDI, yoksa None (mırıltıdan üretilmez)
     surface_count: Optional[SurfaceCount] = None
+    surfaces: list[ToothSurface] = Field(default_factory=list)
+    condition: Optional[DentalCondition] = None
     canal_count: Optional[CanalCount] = None
     status: ProcedureStatus = ProcedureStatus.UNCLEAR
     source_quotes: list[str] = Field(default_factory=list)

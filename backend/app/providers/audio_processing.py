@@ -30,6 +30,23 @@ from app.pipeline.types import (
     Word,
 )
 
+_ENV_FILE = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+
+
+def _load_env_file(path: str) -> None:
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
 
 class AudioProcessingProvider(ABC):
     """ASR + diarization + alignment için vendor-agnostic arabirim.
@@ -127,6 +144,8 @@ def create_audio_processing_provider(provider_name: Optional[str] = None) -> Aud
     buraya bağlanacak.
     """
 
+    if provider_name is None:
+        _load_env_file(_ENV_FILE)
     selected = (provider_name or os.environ.get("TANDELA_AUDIO_PROVIDER") or "not_configured").strip().lower()
     if selected in {"not_configured", "none", "disabled"}:
         return NotConfiguredAudioProcessingProvider()
@@ -140,6 +159,10 @@ def create_audio_processing_provider(provider_name: Optional[str] = None) -> Aud
         from app.providers.gemini_audio_provider import GeminiAudioProcessingProvider
 
         return GeminiAudioProcessingProvider()
+    if selected in {"deepgram", "deepgram_nova3", "deepgram_audio"}:
+        from app.providers.deepgram_audio_provider import DeepgramAudioProcessingProvider
+
+        return DeepgramAudioProcessingProvider()
     raise AudioProviderConfigurationError(f"Unsupported TANDELA_AUDIO_PROVIDER: {selected}")
 
 

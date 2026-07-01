@@ -164,7 +164,7 @@ def _continue_after_role_assignment(
     try:
         facts = stages.extract_clinical_facts(role_labelled, llm_provider)
         note = stages.generate_clinical_note(facts, llm_provider)
-        procedures = stages.extract_procedures(facts)
+        procedures = stages.extract_dental_chart_commands(facts, llm_provider)
         code_suggestions = stages.match_codes_and_checklist(procedures, facts, llm_provider)
     except SourceRoleInvariantViolation as exc:
         logger.error(

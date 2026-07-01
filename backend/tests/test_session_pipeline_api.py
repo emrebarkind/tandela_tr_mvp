@@ -31,6 +31,10 @@ from app.providers.gemini_audio_provider import (
     GeminiAudioProcessingProvider,
     normalize_gemini_audio_response,
 )
+from app.providers.deepgram_audio_provider import (
+    DeepgramAudioProcessingProvider,
+    normalize_deepgram_audio_response,
+)
 from app.providers.managed_audio_provider import (
     ManagedHttpAudioProcessingProvider,
     normalize_managed_audio_response,
@@ -214,6 +218,15 @@ class SessionPipelineApiTests(unittest.TestCase):
                     "uncertain_items": [],
                     "is_draft": True,
                 },
+                [
+                    {
+                        "tooth_fdi": 46,
+                        "surfaces": None,
+                        "condition": "rct",
+                        "status": "planned",
+                        "source_quote": "46 numara için kanal tedavisi planlandı",
+                    }
+                ],
                 {
                     "explanations": [
                         {"code": "FIX-KANAL-1K", "fit_reason": "Aday listesinde.", "caveat": None},
@@ -348,6 +361,15 @@ class SessionPipelineApiTests(unittest.TestCase):
                     "uncertain_items": [],
                     "is_draft": True,
                 },
+                [
+                    {
+                        "tooth_fdi": 46,
+                        "surfaces": None,
+                        "condition": "rct",
+                        "status": "planned",
+                        "source_quote": "46 numara için kanal tedavisi planlandı",
+                    }
+                ],
                 {
                     "explanations": [
                         {"code": "FIX-KANAL-1K", "fit_reason": "Aday listesinde.", "caveat": None},
@@ -442,11 +464,12 @@ class SessionPipelineApiTests(unittest.TestCase):
     def test_audio_process_route_deletes_raw_audio_when_provider_not_configured(self) -> None:
         client = TestClient(app)
 
-        response = client.post(
-            "/sessions/audio/process",
-            data={"session_id": "audio-skeleton"},
-            files={"audio": ("sample.webm", b"not-real-audio", "audio/webm")},
-        )
+        with patch.dict("os.environ", {"TANDELA_AUDIO_PROVIDER": "not_configured"}):
+            response = client.post(
+                "/sessions/audio/process",
+                data={"session_id": "audio-skeleton"},
+                files={"audio": ("sample.webm", b"not-real-audio", "audio/webm")},
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -493,6 +516,53 @@ class SessionPipelineApiTests(unittest.TestCase):
         status_response = client.get(f"/sessions/audio/jobs/{payload['job_id']}")
         self.assertEqual(status_response.status_code, 200)
         self.assertEqual(status_response.json()["job_id"], payload["job_id"])
+
+    def test_session_audio_route_feeds_transcript_into_pipeline_and_deletes_raw_audio(self) -> None:
+        app.dependency_overrides[get_llm_provider] = lambda: ScriptedLLM(
+            [
+                {
+                    "assignments": [
+                        {
+                            "speaker_id": "A",
+                            "role": "dentist",
+                            "status": "clear",
+                            "utterance_count": 4,
+                            "reason": "Muayeneyi yönetiyor.",
+                        },
+                        {
+                            "speaker_id": "B",
+                            "role": "patient",
+                            "status": "clear",
+                            "utterance_count": 1,
+                            "reason": "Şikayet bildiriyor.",
+                        },
+                        {
+                            "speaker_id": "C",
+                            "role": "assistant_or_other",
+                            "status": "review_needed",
+                            "utterance_count": 1,
+                            "reason": "Tek ifade.",
+                        },
+                    ],
+                    "manual_review_required": True,
+                }
+            ]
+        )
+        client = TestClient(app)
+
+        with patch.dict("os.environ", {"TANDELA_AUDIO_PROVIDER": "dev_fixture"}):
+            response = client.post(
+                "/sessions/audio-phase-c/audio",
+                headers=AUTH_HEADERS,
+                files={"audio": ("sample.webm", b"not-real-audio", "audio/webm")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["next_action"], "review_speaker_roles")
+        self.assertEqual(payload["audio_processing"]["status"], "transcript_ready")
+        self.assertTrue(payload["audio_processing"]["raw_audio_deleted"])
+        self.assertEqual(payload["audio_processing"]["transcript"]["session_id"], "audio-phase-c")
 
     def test_audio_job_status_returns_404_for_unknown_job(self) -> None:
         client = TestClient(app)
@@ -553,7 +623,8 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
 
     def test_audio_provider_factory_defaults_to_safe_not_configured_provider(self) -> None:
-        provider = create_audio_processing_provider()
+        with patch.dict("os.environ", {"TANDELA_AUDIO_PROVIDER": "not_configured"}):
+            provider = create_audio_processing_provider()
 
         self.assertIsInstance(provider, NotConfiguredAudioProcessingProvider)
 
@@ -581,6 +652,31 @@ class SessionPipelineApiTests(unittest.TestCase):
             provider = create_audio_processing_provider("gemini_audio")
 
         self.assertIsInstance(provider, GeminiAudioProcessingProvider)
+
+    def test_audio_provider_factory_supports_deepgram_with_eu_endpoint(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "DEEPGRAM_API_KEY": "test-key",
+                "DEEPGRAM_BASE_URL": "https://api.eu.deepgram.com",
+            },
+            clear=True,
+        ):
+            provider = create_audio_processing_provider("deepgram")
+
+        self.assertIsInstance(provider, DeepgramAudioProcessingProvider)
+
+    def test_audio_provider_factory_rejects_deepgram_non_eu_endpoint(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "DEEPGRAM_API_KEY": "test-key",
+                "DEEPGRAM_BASE_URL": "https://api.deepgram.com",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(AudioProviderConfigurationError):
+                create_audio_processing_provider("deepgram")
 
     def test_audio_provider_factory_rejects_managed_http_without_required_env(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
@@ -645,6 +741,40 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertEqual(transcript.utterances[1].speaker_id, "B")
         self.assertGreater(transcript.utterances[0].end_sec, transcript.utterances[0].start_sec)
         self.assertGreater(len(transcript.utterances[0].words), 0)
+
+    def test_deepgram_response_normalizes_utterances_to_speaker_labelled_transcript(self) -> None:
+        transcript = normalize_deepgram_audio_response(
+            "deepgram-normalize",
+            {
+                "results": {
+                    "utterances": [
+                        {
+                            "speaker": 0,
+                            "start": 0.0,
+                            "end": 1.4,
+                            "transcript": "Merhaba, şikayetiniz nedir?",
+                            "words": [
+                                {"word": "merhaba", "punctuated_word": "Merhaba,", "start": 0.0, "end": 0.4, "speaker": 0},
+                                {"word": "şikayetiniz", "punctuated_word": "şikayetiniz", "start": 0.5, "end": 0.9, "speaker": 0},
+                            ],
+                        },
+                        {
+                            "speaker": 1,
+                            "start": 1.5,
+                            "end": 3.0,
+                            "transcript": "Sağ alt tarafta ağrım var.",
+                            "words": [],
+                        },
+                    ],
+                    "channels": [],
+                }
+            },
+        )
+
+        self.assertEqual(transcript.session_id, "deepgram-normalize")
+        self.assertEqual(transcript.utterances[0].speaker_id, "A")
+        self.assertEqual(transcript.utterances[1].speaker_id, "B")
+        self.assertEqual(transcript.utterances[0].words[0].text, "Merhaba,")
 
     def test_audio_provider_factory_rejects_unknown_provider(self) -> None:
         with self.assertRaises(AudioProviderConfigurationError):

@@ -3,6 +3,7 @@
 import {
   AlertTriangle,
   BadgeCheck,
+  CalendarClock,
   Check,
   ChevronDown,
   CircleDot,
@@ -10,6 +11,7 @@ import {
   Copy,
   Download,
   FileText,
+  History,
   ListChecks,
   Loader2,
   Mic2,
@@ -22,6 +24,8 @@ import {
   Upload,
   UserCheck,
 } from "lucide-react";
+import { Odontogram, type ToothConditionGroup } from "react-odontogram";
+import "react-odontogram/style.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type Role = "dentist" | "patient" | "assistant_or_other" | "unknown";
@@ -29,6 +33,20 @@ type SpeakerStatus = "clear" | "review_needed" | "unresolved";
 type ChecklistState = "found" | "review" | "missing";
 type ProductMode = "clinical_notes" | "perio_dictation";
 type PerioSite = "MB" | "B" | "DB" | "ML" | "L" | "DL";
+type ToothSurface = "O" | "M" | "D" | "V" | "L";
+type DentalChartCondition =
+  | "caries"
+  | "composite"
+  | "amalgam"
+  | "inlay"
+  | "onlay"
+  | "crown"
+  | "bridge"
+  | "prosthesis"
+  | "implant"
+  | "rct"
+  | "missing"
+  | "unclear";
 
 type TranscriptUtterance = {
   speaker_id: string;
@@ -86,6 +104,20 @@ type AudioJobResponse = {
   updated_at_utc: string;
 };
 
+type ConversationRecord = {
+  id: string;
+  patientName: string;
+  encounterAt: string;
+  durationSec: number;
+  transcriptText: string;
+  utteranceCount: number;
+  speakerCount: number;
+  status: string;
+  nextAction: string;
+  noteSectionCount: number;
+  procedureCount: number;
+};
+
 type Speaker = {
   id: string;
   role: Role;
@@ -136,9 +168,25 @@ type ProcedureObject = {
   procedure_family: string;
   tooth_number_fdi?: number | null;
   surface_count?: string | null;
+  surfaces?: ToothSurface[] | null;
+  surface?: ToothSurface | ToothSurface[] | null;
+  condition?: DentalChartCondition | string | null;
   canal_count?: string | null;
   status: string;
   source_quotes: string[];
+};
+
+type DentalSurfaceCondition = {
+  tooth: number;
+  surfaces: ToothSurface[];
+  condition: DentalChartCondition | string;
+  color: string;
+  status: string;
+};
+
+type DentalChartAdapterResult = {
+  teethConditions: ToothConditionGroup[];
+  surfaceConditions: DentalSurfaceCondition[];
 };
 
 type ProcedureReview = {
@@ -173,6 +221,7 @@ type PipelineReviewResponse = {
     uncertain_items: string[];
   } | null;
   export_payload?: ExportPayload | null;
+  audio_processing?: AudioProcessResponse | null;
 };
 
 type ExportPayload = {
@@ -374,13 +423,33 @@ const checklistLabels: Record<ChecklistState, string> = {
   missing: "Eksik",
 };
 
+const procedureConditionColors: Record<string, string> = {
+  kanal_tedavisi: "#7A5A8C",
+  kompozit_dolgu: "#5A96C8",
+  dis_cekimi: "#D8DDE5",
+  gecici_restorasyon: "#E49545",
+  rct: "#7A5A8C",
+  composite: "#5A96C8",
+  missing: "#D8DDE5",
+  caries: "#D4503A",
+  amalgam: "#7A7A7A",
+  inlay: "#88B4D0",
+  onlay: "#6694B8",
+  crown: "#E49545",
+  implant: "#4A86C2",
+  other: "#D4884A",
+};
+
 const transcriptLinePattern = /^([A-Za-zÇĞİÖŞÜçğıöşü0-9_-]+)\s*:\s*(.+)$/;
 const perioSites: PerioSite[] = ["MB", "B", "DB", "ML", "L", "DL"];
 
 export default function ReviewPage() {
   const [productMode, setProductMode] = useState<ProductMode>("clinical_notes");
   const [sessionId, setSessionId] = useState("golden-s1-ui");
+  const [patientName, setPatientName] = useState("Demo Danışan");
+  const [encounterAt, setEncounterAt] = useState(() => toDatetimeLocalValue(new Date()));
   const [transcriptText, setTranscriptText] = useState(sampleTranscript);
+  const [conversationRecords, setConversationRecords] = useState<ConversationRecord[]>([]);
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
   const [selectedCode, setSelectedCode] = useState("FIX-KANAL-2K");
   const [selectedProcedureIndex, setSelectedProcedureIndex] = useState(0);
@@ -390,6 +459,7 @@ export default function ReviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [recordingState, setRecordingState] = useState<RecordingState>("idle");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [lastRecordingDuration, setLastRecordingDuration] = useState(0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioFileName, setAudioFileName] = useState<string | null>(null);
@@ -406,12 +476,15 @@ export default function ReviewPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const timerRef = useRef<number | null>(null);
+  const recordingStartedAtRef = useRef<number | null>(null);
   const speechRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const speechUtterancesRef = useRef<TranscriptUtterance[]>([]);
 
   const utterances = useMemo(() => parseTranscript(transcriptText), [transcriptText]);
   const transcriptDiagnostics = useMemo(() => inspectTranscript(transcriptText), [transcriptText]);
   const canAnalyzeTranscript = transcriptDiagnostics.utteranceCount > 0 && transcriptDiagnostics.invalidLines.length === 0;
+  const needsManualSpeakerSplit = transcriptDiagnostics.utteranceCount > 1 && transcriptDiagnostics.speakerCount < 2;
+  const displayedDuration = recordingState === "recording" ? recordingSeconds : lastRecordingDuration;
 
   useEffect(() => {
     setResponse(null);
@@ -472,6 +545,37 @@ export default function ReviewPage() {
     : isLoading
       ? "Taslak Hazırlanıyor"
       : productMode === "perio_dictation" ? "Dikteyi Başlat" : "Görüşmeyi Başlat";
+
+  function startNewConversation() {
+    const now = new Date();
+    setSessionId(`session-${now.getTime()}`);
+    setPatientName("");
+    setEncounterAt(toDatetimeLocalValue(now));
+    setTranscriptText("");
+    setSpeakers([]);
+    setResponse(null);
+    setEditableNote(null);
+    setExportPayload(null);
+    setExportMessage(null);
+    setRoleGateMessage(null);
+    setAudioMessage(null);
+    setError(null);
+    setApproved(false);
+    setLastRecordingDuration(0);
+    setRecordingSeconds(0);
+    setSelectedProcedureIndex(0);
+  }
+
+  function loadConversationRecord(record: ConversationRecord) {
+    setSessionId(record.id);
+    setPatientName(record.patientName);
+    setEncounterAt(record.encounterAt);
+    setTranscriptText(record.transcriptText);
+    setLastRecordingDuration(record.durationSec);
+    setAudioMessage("Kayıt özeti yüklendi. Gerekiyorsa transkripti yeniden analiz edin.");
+    setRoleGateMessage(null);
+    setError(null);
+  }
 
   async function runTranscriptAnalysis(sourceUtterances: TranscriptUtterance[]) {
     return postReviewResponse("/sessions", {
@@ -641,6 +745,11 @@ export default function ReviewPage() {
       if (event.data.size > 0) chunksRef.current.push(event.data);
     };
     recorder.onstop = () => {
+      const durationSec = recordingStartedAtRef.current
+        ? Math.max(1, Math.round((Date.now() - recordingStartedAtRef.current) / 1000))
+        : recordingSeconds;
+      setLastRecordingDuration(durationSec);
+      recordingStartedAtRef.current = null;
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
       if (audioUrl) URL.revokeObjectURL(audioUrl);
       setAudioBlob(blob);
@@ -655,7 +764,9 @@ export default function ReviewPage() {
     streamRef.current = stream;
     recorderRef.current = recorder;
     recorder.start();
+    recordingStartedAtRef.current = Date.now();
     setRecordingSeconds(0);
+    setLastRecordingDuration(0);
     setAudioMessage(null);
     setRecordingState("recording");
     if (timerRef.current !== null) window.clearInterval(timerRef.current);
@@ -766,6 +877,27 @@ export default function ReviewPage() {
     void analyzeRecognizedUtterances(speechUtterancesRef.current);
   }
 
+  function applyRoleTaggedSpeakerSplit() {
+    const normalized = splitRoleTaggedTranscript(transcriptText);
+    if (normalized === transcriptText) {
+      setAudioMessage("Doktor:/Hasta:/Asistan: etiketi bulunamadı. Satır başlarını elle A:/B:/C: olarak düzeltip Analiz'e basın.");
+      return;
+    }
+    setTranscriptText(normalized);
+    setAudioMessage("Doktor/Hasta etiketleri A/B satırlarına çevrildi. Düzeltilmiş transkripti analiz edin.");
+    setRoleGateMessage(null);
+  }
+
+  function updateTranscriptUtterance(index: number, patch: Partial<TranscriptUtterance>) {
+    const updated = utterances.map((utterance, utteranceIndex) =>
+      utteranceIndex === index ? { ...utterance, ...patch } : utterance,
+    );
+    setTranscriptText(formatTranscript(updated));
+    setRoleGateMessage(null);
+    setApproved(false);
+    setExportPayload(null);
+  }
+
   async function uploadAudioBlob(sourceBlob: Blob, sourceFileName: string) {
     setIsLoading(true);
     setError(null);
@@ -774,13 +906,11 @@ export default function ReviewPage() {
     setExportPayload(null);
     try {
       const form = new FormData();
-      form.append("session_id", sessionId);
       form.append("audio", sourceBlob, sourceFileName);
-      const job = await postFormResponse("/sessions/audio/jobs", form);
-      const completedJob = await waitForAudioJob(job);
-      const result = completedJob.result;
+      const reviewResult = await postReviewFormResponse(`/sessions/${encodeURIComponent(sessionId)}/audio`, form);
+      const result = reviewResult.audio_processing;
       if (!result) {
-        setAudioMessage(`audio_job_${completedJob.status} · ${completedJob.error ?? "Sonuç henüz hazır değil."}`);
+        setAudioMessage("Ses endpoint'i audio_processing sonucu döndürmedi.");
         return;
       }
       let analysisMessage = "";
@@ -799,10 +929,10 @@ export default function ReviewPage() {
           );
           analysisMessage = ` · ${speakerCount} konuşmacı algılandı · ${draft.teeth.length} diş perio taslağına işlendi`;
         } else {
-        try {
-          const reviewResult = await runTranscriptAnalysis(transcriptUtterances);
           applyBackendResponse(reviewResult, transcriptUtterances);
-          if (reviewResult.next_action === "review_speaker_roles") {
+          if (speakerCount < 2) {
+            setRoleGateMessage("Deepgram tek konuşmacı algıladı. Transkript satırlarını A:/B: olarak düzeltip yeniden Analiz çalıştırın.");
+          } else if (reviewResult.next_action === "review_speaker_roles") {
             setRoleGateMessage("Transkript hazır. Klinik not ve işlem analizi için konuşmacı rollerini onaylayın.");
           } else {
             setRoleGateMessage(null);
@@ -811,15 +941,11 @@ export default function ReviewPage() {
             reviewResult.next_action === "review_note_and_codes"
               ? ` · ${speakerCount} konuşmacı algılandı · klinik review hazır`
               : ` · ${speakerCount} konuşmacı algılandı · rol onayı bekliyor`;
-        } catch (analysisError) {
-          setError(errorMessage(analysisError));
-          analysisMessage = ` · ${speakerCount} konuşmacı algılandı · transcript alındı, analiz tamamlanamadı`;
-        }
         }
       }
       const warningsText = result.warnings?.length ? ` · uyarı: ${result.warnings.join(" · ")}` : "";
       setAudioMessage(
-        `${completedJob.status} · ${result.status} · provider: ${result.provider_status} · ham ses silindi: ${result.raw_audio_deleted ? "evet" : "hayır"}${analysisMessage} · ${result.message}${warningsText}`,
+        `${result.status} · provider: ${result.provider_status} · ham ses silindi: ${result.raw_audio_deleted ? "evet" : "hayır"}${analysisMessage} · ${result.message}${warningsText}`,
       );
     } catch (caught) {
       setError(errorMessage(caught));
@@ -846,6 +972,28 @@ export default function ReviewPage() {
     }
     const firstCode = result.dentist_review?.procedures[0]?.candidates[0]?.code;
     if (firstCode) setSelectedCode(firstCode);
+    upsertConversationRecord(result, sourceUtterances);
+  }
+
+  function upsertConversationRecord(result: PipelineReviewResponse, sourceUtterances: TranscriptUtterance[]) {
+    const normalizedTranscript = formatTranscript(sourceUtterances);
+    const record: ConversationRecord = {
+      id: result.session_id || sessionId,
+      patientName: patientName.trim() || "İsimsiz danışan",
+      encounterAt,
+      durationSec: displayedDuration,
+      transcriptText: normalizedTranscript,
+      utteranceCount: sourceUtterances.length,
+      speakerCount: new Set(sourceUtterances.map((utterance) => utterance.speaker_id)).size,
+      status: statusText(result.status),
+      nextAction: result.next_action,
+      noteSectionCount: result.dentist_review?.note ? noteSectionsFromBackend(result.dentist_review.note).filter((section) => section.lines.length).length : 0,
+      procedureCount: result.dentist_review?.procedures.length ?? 0,
+    };
+    setConversationRecords((current) => {
+      const next = [record, ...current.filter((item) => item.id !== record.id)];
+      return next.slice(0, 8);
+    });
   }
 
   function updateSpeakerRole(id: string, role: Role) {
@@ -958,8 +1106,38 @@ export default function ReviewPage() {
         <aside className="grid content-start gap-4">
           <section className="rounded-[8px] border border-black/10 bg-white p-4 shadow-line">
             <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">Görüşme</p>
+                <input
+                  className="mt-2 h-10 w-full rounded-[8px] border border-black/10 bg-linen px-3 text-sm font-semibold"
+                  value={patientName}
+                  onChange={(event) => setPatientName(event.target.value)}
+                  placeholder="Danışan adı"
+                  aria-label="Danışan adı"
+                />
+              </div>
+              <button
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-linen text-ink"
+                type="button"
+                onClick={startNewConversation}
+                title="Yeni görüşme"
+              >
+                <FileText className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+            <div className="mt-3 grid gap-2">
+              <label className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                Tarih
+                <input
+                  className="mt-1 h-10 w-full rounded-[8px] border border-black/10 bg-linen px-3 text-sm font-semibold normal-case tracking-normal text-ink"
+                  type="datetime-local"
+                  value={encounterAt}
+                  onChange={(event) => setEncounterAt(event.target.value)}
+                  aria-label="Görüşme tarihi"
+                />
+              </label>
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">Session</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">Session ID</p>
                 <input
                   className="mt-2 h-10 w-full rounded-[8px] border border-black/10 bg-linen px-3 text-sm font-semibold"
                   value={sessionId}
@@ -967,11 +1145,10 @@ export default function ReviewPage() {
                   aria-label="Session ID"
                 />
               </div>
-              <ShieldCheck className="h-6 w-6 text-teal" aria-hidden="true" />
             </div>
             <div className="mt-4 grid grid-cols-3 gap-2 text-sm">
-              <Metric label="Rol" value={`${speakers.length}`} />
-              <Metric label={productMode === "perio_dictation" ? "Diş" : "İşlem"} value={productMode === "perio_dictation" ? `${perioDraft?.teeth.length ?? 0}` : `${procedures.length || 2}`} />
+              <Metric label="Süre" value={formatDuration(displayedDuration)} />
+              <Metric label="İfade" value={`${transcriptDiagnostics.utteranceCount}`} />
               <Metric label="Uyarı" value={productMode === "perio_dictation" ? `${perioDraft?.review_items.length ?? 0}` : `${issueCount}`} />
             </div>
             <div className="mt-4 grid grid-cols-2 gap-2">
@@ -998,6 +1175,46 @@ export default function ReviewPage() {
 
           <section className="rounded-[8px] border border-black/10 bg-white p-4 shadow-line">
             <div className="flex items-center gap-2">
+              <History className="h-5 w-5 text-moss" aria-hidden="true" />
+              <h2 className="text-lg font-semibold">Görüşme kayıtları</h2>
+            </div>
+            <div className="mt-4 grid gap-3">
+              {conversationRecords.length ? (
+                conversationRecords.map((record) => (
+                  <button
+                    key={record.id}
+                    className="rounded-[8px] border border-black/10 bg-linen p-3 text-left hover:border-teal/50"
+                    type="button"
+                    onClick={() => loadConversationRecord(record)}
+                    title="Görüşme kaydını aç"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate font-semibold">{record.patientName}</p>
+                        <p className="mt-1 text-xs font-semibold text-muted">{formatEncounterDate(record.encounterAt)}</p>
+                      </div>
+                      <span className="shrink-0 rounded-[8px] bg-white px-2 py-1 text-xs font-semibold text-muted">
+                        {formatDuration(record.durationSec)}
+                      </span>
+                    </div>
+                    <div className="mt-3 grid grid-cols-3 gap-2 text-xs font-semibold text-muted">
+                      <span>{record.utteranceCount} ifade</span>
+                      <span>{record.speakerCount} konuşmacı</span>
+                      <span>{record.procedureCount} işlem</span>
+                    </div>
+                    <p className="mt-2 truncate text-xs font-semibold text-teal">{record.status}</p>
+                  </button>
+                ))
+              ) : (
+                <p className="rounded-[8px] bg-linen p-3 text-sm font-semibold leading-6 text-muted">
+                  Henüz kayıt yok. Analiz çalışınca görüşme burada listelenir.
+                </p>
+              )}
+            </div>
+          </section>
+
+          <section className="rounded-[8px] border border-black/10 bg-white p-4 shadow-line">
+            <div className="flex items-center gap-2">
               <ClipboardList className="h-5 w-5 text-moss" aria-hidden="true" />
               <h2 className="text-lg font-semibold">Transkript</h2>
             </div>
@@ -1006,8 +1223,38 @@ export default function ReviewPage() {
               <span>Konuşmacı: {transcriptDiagnostics.speakerCount}</span>
               <span>Hata: {transcriptDiagnostics.invalidLines.length}</span>
             </div>
+            {utterances.length ? (
+              <div className="mt-4 grid max-h-[360px] gap-2 overflow-auto pr-1">
+                {utterances.map((utterance, index) => (
+                  <div key={`${index}-${utterance.text.slice(0, 18)}`} className="rounded-[8px] border border-black/10 bg-linen/70 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-[8px] bg-white text-xs font-semibold shadow-line">
+                        {index + 1}
+                      </span>
+                      <select
+                        className="h-8 min-w-[132px] rounded-[8px] border border-black/10 bg-white px-2 text-xs font-semibold text-ink"
+                        value={utterance.speaker_id}
+                        onChange={(event) => updateTranscriptUtterance(index, { speaker_id: event.target.value })}
+                        aria-label={`${index + 1}. ifade konuşmacısı`}
+                      >
+                        <option value="A">Hekim · A</option>
+                        <option value="B">Hasta · B</option>
+                        <option value="C">Asistan · C</option>
+                        <option value="D">Diğer · D</option>
+                      </select>
+                    </div>
+                    <textarea
+                      className="mt-2 min-h-[74px] w-full resize-y rounded-[8px] border border-black/10 bg-white p-2 text-sm leading-6 text-ink"
+                      value={utterance.text}
+                      onChange={(event) => updateTranscriptUtterance(index, { text: event.target.value })}
+                      aria-label={`${index + 1}. ifade metni`}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <textarea
-              className={`mt-4 min-h-[300px] w-full resize-y rounded-[8px] border p-3 text-sm leading-6 text-ink ${
+              className={`mt-4 min-h-[180px] w-full resize-y rounded-[8px] border p-3 text-sm leading-6 text-ink ${
                 transcriptDiagnostics.invalidLines.length
                   ? "border-coral/50 bg-coral/5"
                   : "border-black/10 bg-linen"
@@ -1019,6 +1266,10 @@ export default function ReviewPage() {
             {transcriptDiagnostics.invalidLines.length ? (
               <p className="mt-3 rounded-[8px] bg-coral/10 p-3 text-xs font-semibold leading-5 text-coral">
                 Satır {transcriptDiagnostics.invalidLines.join(", ")} okunamadı. Her ifade A: metin formatında olmalı.
+              </p>
+            ) : needsManualSpeakerSplit ? (
+              <p className="mt-3 rounded-[8px] bg-gold/18 p-3 text-xs font-semibold leading-5 text-[#7a6221]">
+                Tek konuşmacı algılandı. Hekim ve hasta aynı A satırında kaldıysa satır editoründe ifadeleri Hekim/Hasta olarak ayırıp yeniden analiz edin.
               </p>
             ) : (
               <p className="mt-3 text-xs font-semibold text-muted">
@@ -1045,6 +1296,25 @@ export default function ReviewPage() {
                 <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
                 Biçimle
               </button>
+              <button
+                className="inline-flex h-9 items-center gap-2 rounded-[8px] border border-black/10 bg-white px-3 text-xs font-semibold"
+                type="button"
+                onClick={applyRoleTaggedSpeakerSplit}
+                title="Doktor:/Hasta: etiketlerini A:/B: satırlarına çevir"
+              >
+                <UserCheck className="h-3.5 w-3.5" aria-hidden="true" />
+                Doktor/Hasta → A/B
+              </button>
+              <button
+                className="inline-flex h-9 items-center gap-2 rounded-[8px] bg-ink px-3 text-xs font-semibold text-white disabled:opacity-55"
+                type="button"
+                onClick={() => void analyzeTranscript()}
+                disabled={isLoading || !canAnalyzeTranscript}
+                title="Düzeltilmiş transkripti analiz et"
+              >
+                <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                Düzeltilmiş Analiz
+              </button>
             </div>
           </section>
 
@@ -1063,7 +1333,7 @@ export default function ReviewPage() {
             <p className="mt-3 text-sm leading-6 text-muted">
               {productMode === "perio_dictation"
                 ? "Muayene sırasında cep derinliği, kanama, plak ve furkasyon değerlerini sesli dikte edin. Kayıt bitince perio chart taslağı hazırlanır."
-                : "Hastayla her zamanki gibi konuşun. Görüşmeyi bitirdiğinizde transkript, klinik not taslağı, işlem review ve chart otomatik hazırlanır."}
+                : "Hastayla her zamanki gibi konuşun. Görüşmeyi bitirdiğinizde klinik not, dental chart ve perio chart taslakları inceleme için hazırlanır."}
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
               <button
@@ -1133,6 +1403,54 @@ export default function ReviewPage() {
           ) : null}
 
           <div className="grid gap-6 p-4 lg:p-6">
+            <section className="rounded-[8px] border border-black/10 bg-paper p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2 text-muted">
+                    <CalendarClock className="h-4 w-4" aria-hidden="true" />
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em]">Görüşme özeti</p>
+                  </div>
+                  <h3 className="mt-1 text-xl font-semibold">{patientName.trim() || "İsimsiz danışan"}</h3>
+                  <p className="mt-2 text-sm font-semibold leading-6 text-muted">
+                    {formatEncounterDate(encounterAt)} · {formatDuration(displayedDuration)} · {transcriptDiagnostics.utteranceCount} ifade · {transcriptDiagnostics.speakerCount} konuşmacı
+                  </p>
+                </div>
+                <StatusBadge label={response?.status ? statusText(response.status) : "Taslak"} tone={needsRoleReview ? "warning" : "success"} loading={isLoading} />
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <Metric label="Transkript" value={`${transcriptDiagnostics.utteranceCount}`} />
+                <Metric label="Not başlığı" value={`${noteSections.filter((section) => section.lines.length).length}`} />
+                <Metric label="İşlem" value={`${procedures.length}`} />
+              </div>
+            </section>
+
+            <section className="grid gap-3 lg:grid-cols-3">
+              <ProductOutputCard
+                index="01"
+                title="Clinical-note drafts"
+                subtitle="Ana şikayet, geçmiş, bulgular ve tedavi planı"
+                status={displayedNote ? "Taslak hazır" : "Bekliyor"}
+                tone={displayedNote ? "success" : "neutral"}
+                icon={<FileText className="h-5 w-5" aria-hidden="true" />}
+              />
+              <ProductOutputCard
+                index="02"
+                title="Dental chart"
+                subtitle={`${activeTooth} diş bulgusu ve işlem etiketi`}
+                status={activeProcedure ? "Chart taslağı" : "Bekliyor"}
+                tone={activeProcedure ? "success" : "neutral"}
+                icon={<CircleDot className="h-5 w-5" aria-hidden="true" />}
+              />
+              <ProductOutputCard
+                index="03"
+                title="Perio charting"
+                subtitle="Cep, kanama, plak, furkasyon ve mobilite"
+                status={perioDraft?.teeth.length ? "Perio taslak" : "Dikte bekliyor"}
+                tone={perioDraft?.teeth.length ? "success" : "neutral"}
+                icon={<ClipboardList className="h-5 w-5" aria-hidden="true" />}
+              />
+            </section>
+
             <div className="grid gap-3 sm:grid-cols-3">
               {productMode === "perio_dictation" ? (
                 <>
@@ -1162,6 +1480,11 @@ export default function ReviewPage() {
                     <p className="mt-2 text-sm font-semibold leading-6 text-[#7a6221]">
                       Transkript alındı. Klinik not, işlem kodları ve dental chart rol onayından sonra oluşturulacak.
                     </p>
+                    {needsManualSpeakerSplit ? (
+                      <p className="mt-2 rounded-[8px] bg-white/70 p-3 text-sm font-semibold leading-6 text-[#7a6221]">
+                        Şu anda transkriptte tek konuşmacı var. Aynı konuşmacıya hem hekim hem hasta rolü verilemez; sol taraftaki satır editoründe ifadeleri Hekim/Hasta olarak ayırıp Düzeltilmiş Analiz çalıştırın.
+                      </p>
+                    ) : null}
                   </div>
                   <button
                     className="inline-flex h-11 items-center gap-2 rounded-[8px] bg-ink px-4 text-sm font-semibold text-white disabled:opacity-55"
@@ -1319,12 +1642,7 @@ export default function ReviewPage() {
 
           <section className="rounded-[8px] border border-black/10 bg-white p-4 shadow-line">
             <PanelTitle index="02" title="Dental chart" icon={<CircleDot className="h-5 w-5" />} />
-            <DentalChart
-              activeTooth={activeTooth}
-              procedureFamily={activeProcedure?.procedure.procedure_family ?? "kanal_tedavisi"}
-              status={procedureStatus}
-              canalStatus={canalStatus}
-            />
+            <DentalChart procedures={procedures.map((procedure) => procedure.procedure)} approved={approved} />
           </section>
 
           <section className="rounded-[8px] border border-black/10 bg-white p-4 shadow-line">
@@ -1426,9 +1744,9 @@ export default function ReviewPage() {
         <div className="flex min-w-0 items-center gap-3">
           <Mic2 className="h-5 w-5 shrink-0 text-teal" aria-hidden="true" />
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold">{response?.session_id ?? sessionId}</p>
+            <p className="truncate text-sm font-semibold">{patientName.trim() || "İsimsiz danışan"}</p>
             <p className="truncate text-xs text-muted">
-              {response?.next_action ?? "hazır"} {response?.status ? `· ${response.status}` : ""}
+              {formatEncounterDate(encounterAt)} · {formatDuration(displayedDuration)} · {response?.next_action ?? "hazır"}
             </p>
           </div>
         </div>
@@ -1461,6 +1779,42 @@ function Metric({ label, value }: { label: string; value: string }) {
     <div className="rounded-[8px] border border-black/10 bg-white p-3 shadow-line">
       <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">{label}</p>
       <p className="mt-1 text-lg font-semibold">{value}</p>
+    </div>
+  );
+}
+
+function ProductOutputCard({
+  index,
+  title,
+  subtitle,
+  status,
+  tone,
+  icon,
+}: {
+  index: string;
+  title: string;
+  subtitle: string;
+  status: string;
+  tone: "success" | "neutral";
+  icon: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-[8px] border border-black/10 bg-white p-4 shadow-line">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-2xl font-light text-black/18">{index}</p>
+          <h3 className="mt-1 text-base font-semibold">{title}</h3>
+        </div>
+        <div className={tone === "success" ? "text-teal" : "text-muted"}>{icon}</div>
+      </div>
+      <p className="mt-3 min-h-10 text-sm font-semibold leading-5 text-muted">{subtitle}</p>
+      <span
+        className={`mt-4 inline-flex rounded-[8px] px-2.5 py-1 text-xs font-semibold ${
+          tone === "success" ? "bg-teal/12 text-teal" : "bg-linen text-muted"
+        }`}
+      >
+        {status}
+      </span>
     </div>
   );
 }
@@ -1532,6 +1886,19 @@ async function postFormResponse(path: string, body: FormData): Promise<AudioJobR
     throw new Error(text || `HTTP ${response.status}`);
   }
   return response.json() as Promise<AudioJobResponse>;
+}
+
+async function postReviewFormResponse(path: string, body: FormData): Promise<PipelineReviewResponse> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: AUTH_HEADERS,
+    body,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return response.json() as Promise<PipelineReviewResponse>;
 }
 
 async function getAudioJob(jobId: string): Promise<AudioJobResponse> {
@@ -1611,6 +1978,58 @@ function formatTranscript(utterances: TranscriptUtterance[]) {
   return utterances.map((utterance) => `${utterance.speaker_id}: ${utterance.text}`).join("\n");
 }
 
+function splitRoleTaggedTranscript(text: string) {
+  const outputLines: string[] = [];
+  let changed = false;
+
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const parsed = transcriptLinePattern.exec(line);
+    if (!parsed) {
+      outputLines.push(line);
+      continue;
+    }
+
+    const segments = splitRoleTaggedText(parsed[2]);
+    if (!segments.length) {
+      outputLines.push(line);
+      continue;
+    }
+
+    changed = true;
+    outputLines.push(...segments.map((segment) => `${segment.speaker_id}: ${segment.text}`));
+  }
+
+  return changed ? outputLines.join("\n") : text;
+}
+
+function splitRoleTaggedText(text: string): TranscriptUtterance[] {
+  const markerPattern = /\b(doktor|hekim|hasta|asistan)\s*:\s*/gi;
+  const matches = Array.from(text.matchAll(markerPattern));
+  if (!matches.length) return [];
+
+  const segments: TranscriptUtterance[] = [];
+  matches.forEach((match, index) => {
+    const roleLabel = (match[1] ?? "").toLocaleLowerCase("tr-TR");
+    const start = match.index + match[0].length;
+    const end = index + 1 < matches.length ? matches[index + 1].index : text.length;
+    const segmentText = text.slice(start, end).trim();
+    if (!segmentText) return;
+    segments.push({
+      speaker_id: speakerIdForRoleLabel(roleLabel),
+      text: segmentText,
+    });
+  });
+  return segments;
+}
+
+function speakerIdForRoleLabel(roleLabel: string) {
+  if (roleLabel === "hasta") return "B";
+  if (roleLabel === "asistan") return "C";
+  return "A";
+}
+
 function formatExportPayload(payload: ExportPayload) {
   const codes = payload.selected_codes.length ? payload.selected_codes.join(", ") : "Kod seçilmedi";
   return [
@@ -1658,6 +2077,31 @@ function sampleForSpeaker(speakerId: string, utterances: TranscriptUtterance[]) 
 function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   return "Backend bağlantısı başarısız.";
+}
+
+function toDatetimeLocalValue(date: Date) {
+  const offsetMs = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function formatEncounterDate(value: string) {
+  if (!value) return "Tarih yok";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat("tr-TR", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(parsed);
+}
+
+function formatDuration(totalSeconds: number) {
+  if (!totalSeconds) return "0:00";
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
 function statusText(status?: string) {
@@ -1931,88 +2375,116 @@ function PerioDraftPanel({ draft, isLoading }: { draft: PerioDraft | null; isLoa
   );
 }
 
-function DentalChart({
-  activeTooth,
-  procedureFamily,
-  status,
-  canalStatus,
-}: {
-  activeTooth: number;
-  procedureFamily: string;
-  status: string;
-  canalStatus: string;
-}) {
-  const procedureName = procedureLabel(procedureFamily);
-  const teeth = [
-    { id: 48, x: 22, y: 96 },
-    { id: 47, x: 78, y: 92 },
-    { id: activeTooth, x: 134, y: 88 },
-    { id: 45, x: 190, y: 92 },
-  ];
-
+function DentalChart({ procedures, approved }: { procedures: ProcedureObject[]; approved: boolean }) {
+  const chartAdapter = proceduresToDentalChartAdapter(procedures);
+  const firstProcedure = procedures.find((procedure) => procedure.tooth_number_fdi) ?? null;
   return (
     <div className="mt-4 rounded-[8px] bg-linen p-4">
-      <svg
-        viewBox="0 0 250 170"
-        className="h-auto w-full"
-        role="img"
-        aria-label={`${activeTooth} numara vurgulu dental chart`}
-      >
-        <rect x="8" y="18" width="234" height="124" rx="8" fill="#fffdf8" />
-        {teeth.map((tooth) => {
-          const active = tooth.id === activeTooth;
-          return (
-            <g key={`${tooth.id}-${tooth.x}`} transform={`translate(${tooth.x} ${tooth.y})`}>
-              <path
-                d="M8 -42 C-2 -34 -5 -17 -2 -3 C1 12 5 26 14 28 C25 30 36 22 40 7 C44 -8 42 -30 32 -40 C26 -46 16 -48 8 -42Z"
-                fill={active ? "#f1ece4" : "#e7e5df"}
-                stroke="#b9bab6"
-                strokeWidth="2"
-              />
-              <path
-                d="M11 -33 C17 -19 20 -8 18 8 M29 -32 C24 -16 24 -6 29 9"
-                fill="none"
-                stroke="#c7c8c4"
-                strokeLinecap="round"
-                strokeWidth="3"
-              />
-              {active ? (
-                <>
-                  <path
-                    d="M28 -6 C39 -1 43 10 39 20 C31 24 21 22 17 15 C17 5 20 -3 28 -6Z"
-                    fill="#dc4f49"
-                  />
-                  <text x="24" y="12" fill="#202422" fontSize="10" fontWeight="700">
-                    {activeTooth}
-                  </text>
-                </>
-              ) : null}
-              <rect x="-1" y="39" width="48" height="24" rx="4" fill="#ffffff" stroke="#deded9" />
-              <text x="14" y="56" fill="#202422" fontSize="12" fontWeight="700">
-                {tooth.id}
-              </text>
-            </g>
-          );
-        })}
-        <g transform="translate(21 20)">
-          <rect width="116" height="58" rx="8" fill="#ffffff" stroke="#e6e2dc" />
-          <circle cx="16" cy="18" r="5" fill="#dc4f49" />
-          <text x="29" y="22" fill="#202422" fontSize="12" fontWeight="700">
-            {procedureName}
-          </text>
-          <rect x="28" y="33" width="54" height="18" rx="6" fill="#f7f5f0" />
-          <text x="42" y="46" fill="#202422" fontSize="11" fontWeight="700">
-            {activeTooth}
-          </text>
-        </g>
-      </svg>
+      <div className="rounded-[8px] bg-white p-3 shadow-line">
+        <Odontogram
+          teethConditions={chartAdapter.teethConditions}
+          readOnly
+          notation="FDI"
+          showLabels
+          showTooltip
+          layout="square"
+          styles={{ maxWidth: "100%" }}
+        />
+      </div>
+      {chartAdapter.surfaceConditions.length ? (
+        <div className="mt-3 grid gap-2">
+          {chartAdapter.surfaceConditions.map((item) => (
+            <div key={`${item.tooth}-${item.surfaces.join("")}-${item.condition}`} className="rounded-[8px] bg-white p-3 text-sm font-semibold shadow-line">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-[8px] bg-linen px-2 py-1 text-xs text-muted">FDI {item.tooth}</span>
+                {item.surfaces.map((surface) => (
+                  <span key={`${item.tooth}-${surface}`} className="rounded-[8px] px-2 py-1 text-xs text-white" style={{ backgroundColor: item.color }}>
+                    {surface}
+                  </span>
+                ))}
+                <span className="text-muted">{dentalConditionLabel(item.condition)} · {procedureStatusLabel(item.status)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <div className="mt-4 grid grid-cols-3 gap-2 text-sm">
-        <ChartMetric label="FDI" value={`${activeTooth}`} />
-        <ChartMetric label="Durum" value={status === "planned" ? "Planlandı" : status} />
-        <ChartMetric label="Kanal" value={canalStatus === "unclear" ? "İncele" : canalStatus} />
+        <ChartMetric label="FDI" value={firstProcedure?.tooth_number_fdi ? `${firstProcedure.tooth_number_fdi}` : "Belirsiz"} />
+        <ChartMetric label="Durum" value={firstProcedure ? procedureStatusLabel(firstProcedure.status) : "Bekliyor"} />
+        <ChartMetric label="Mod" value={approved ? "Onaylı" : "Read-only"} />
       </div>
     </div>
   );
+}
+
+function proceduresToDentalChartAdapter(procedures: ProcedureObject[]): DentalChartAdapterResult {
+  const grouped = new Map<string, { labelKey: string; status: string; teeth: Set<string> }>();
+  const surfaceConditions: DentalSurfaceCondition[] = [];
+  for (const procedure of procedures) {
+    if (!procedure.tooth_number_fdi) continue;
+    const labelKey = dentalChartConditionKey(procedure);
+    const colorKey = procedureConditionColors[labelKey] ? labelKey : "other";
+    const status = procedure.status || "unclear";
+    const key = `${colorKey}:${status}`;
+    const group = grouped.get(key) ?? { labelKey: colorKey, status, teeth: new Set<string>() };
+    group.teeth.add(`teeth-${procedure.tooth_number_fdi}`);
+    grouped.set(key, group);
+    const surfaces = normalizeProcedureSurfaces(procedure);
+    if (surfaces.length) {
+      surfaceConditions.push({
+        tooth: procedure.tooth_number_fdi,
+        surfaces,
+        condition: procedure.condition || labelKey,
+        color: procedureConditionColors[colorKey] ?? procedureConditionColors.other,
+        status,
+      });
+    }
+  }
+
+  const teethConditions = Array.from(grouped.values()).map(({ labelKey, status, teeth }) => {
+    const color = procedureConditionColors[labelKey] ?? procedureConditionColors.other;
+    return {
+      label: `${dentalConditionLabel(labelKey)} · ${procedureStatusLabel(status)}`,
+      teeth: Array.from(teeth),
+      fillColor: color,
+      outlineColor: color,
+    };
+  });
+
+  return { teethConditions, surfaceConditions };
+}
+
+function dentalChartConditionKey(procedure: ProcedureObject) {
+  if (procedure.condition && procedure.condition !== "unclear") return procedure.condition;
+  if (procedure.procedure_family === "kanal_tedavisi") return "rct";
+  if (procedure.procedure_family === "kompozit_dolgu") return "composite";
+  if (procedure.procedure_family === "dis_cekimi") return "missing";
+  return procedure.procedure_family || "other";
+}
+
+function normalizeProcedureSurfaces(procedure: ProcedureObject): ToothSurface[] {
+  const raw = procedure.surfaces ?? procedure.surface;
+  const values = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  return values.filter(isToothSurface);
+}
+
+function isToothSurface(value: unknown): value is ToothSurface {
+  return value === "O" || value === "M" || value === "D" || value === "V" || value === "L";
+}
+
+function dentalConditionLabel(value: string) {
+  if (value === "caries") return "Çürük";
+  if (value === "composite") return "Kompozit";
+  if (value === "amalgam") return "Amalgam";
+  if (value === "inlay") return "Inlay";
+  if (value === "onlay") return "Onlay";
+  if (value === "crown") return "Kron";
+  if (value === "bridge") return "Köprü";
+  if (value === "prosthesis") return "Protez";
+  if (value === "implant") return "İmplant";
+  if (value === "rct") return "Kanal";
+  if (value === "missing") return "Eksik";
+  return procedureLabel(value);
 }
 
 function ChartMetric({ label, value }: { label: string; value: string }) {

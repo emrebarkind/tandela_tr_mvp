@@ -42,11 +42,13 @@ from app.pipeline.types import (
     ClinicalFact,
     ClinicalFactsBundle,
     ClinicalNoteDraft,
+    DentalCondition,
     FactCategory,
     NoteSentence,
     ProcedureObject,
     ProcedureStatus,
     SurfaceCount,
+    ToothSurface,
     CanalCount,
     CodeSuggestionBundle,
 )
@@ -60,6 +62,7 @@ logger = logging.getLogger(__name__)
 ROLE_ASSIGNMENT_PROMPT_FILE = "role_assignment.md"
 CLINICAL_FACTS_PROMPT_FILE = "clinical_facts_extraction.md"
 CLINICAL_NOTE_PROMPT_FILE = "clinical_note_generation.md"
+DENTAL_CHART_PROMPT_FILE = "dental_chart_extraction.md"
 
 # Fact kategorisi → ClinicalNoteDraft bölümü. 1:1 eşleşme; FactCategory'de
 # bölümsüz kategori yoktur, ClinicalNoteDraft'ta kategorisiz bölüm yoktur.
@@ -742,6 +745,188 @@ def extract_procedures(facts: ClinicalFactsBundle) -> list[ProcedureObject]:
         )
 
     return procedures
+
+
+def extract_dental_chart_commands(
+    facts: ClinicalFactsBundle, llm: LLMProvider
+) -> list[ProcedureObject]:
+    """Dental chart NLU enrichment: ProcedureObject + yüzey/kondisyon.
+
+    Mevcut deterministik `extract_procedures` korunur. Bu aşama yalnızca
+    hekim kaynaklı procedure fact'lerini `docs/dental-chart-nlu-spec.md`
+    kurallarına göre LLM ile zenginleştirir; parse/enum/FDI hatasında
+    güvenli tarafta kalır ve mevcut procedure bilgisini bozmaz.
+    """
+    safe_facts = _enforce_source_role_invariant(facts)
+    base_procedures = extract_procedures(safe_facts)
+    procedure_facts = [
+        fact
+        for fact in safe_facts.facts
+        if fact.category == FactCategory.PROCEDURES
+        and fact.source_role == DentistRole.DENTIST
+        and not _is_negated_procedure_text(_procedure_text(fact))
+    ]
+
+    system_prompt = load_system_prompt(DENTAL_CHART_PROMPT_FILE)
+    enriched: list[ProcedureObject] = []
+    for idx, procedure in enumerate(base_procedures):
+        fact = procedure_facts[idx] if idx < len(procedure_facts) else None
+        if fact is None:
+            enriched.append(procedure)
+            continue
+
+        try:
+            raw_output = llm.complete(system_prompt, _build_dental_chart_user_input(fact))
+            items = _normalize_dental_chart_payload(_loads_llm_json_array(raw_output))
+        except Exception:
+            logger.error(
+                "dental_chart_llm_output_unparseable: session_id=%s — mevcut procedure korunuyor.",
+                safe_facts.session_id,
+            )
+            _append_dental_chart_uncertainty(
+                facts,
+                safe_facts,
+                f"Dental chart çıkarımı parse edilemedi: {fact.source_quote}",
+            )
+            enriched.append(procedure)
+            continue
+
+        item = _select_dental_chart_item(items, fact)
+        if item is None:
+            _append_dental_chart_uncertainty(
+                facts,
+                safe_facts,
+                f"Dental chart çıkarımı belirsiz veya negatif: {fact.source_quote}",
+            )
+            enriched.append(procedure)
+            continue
+
+        updates: dict[str, object] = {}
+        surfaces = _parse_tooth_surfaces(item.get("surfaces"))
+        if surfaces is None:
+            _append_dental_chart_uncertainty(facts, safe_facts, f"Yüzey belirsiz: {fact.source_quote}")
+        else:
+            updates["surfaces"] = surfaces
+
+        condition = _parse_dental_condition(item.get("condition"))
+        if condition is None and item.get("condition") is not None:
+            _append_dental_chart_uncertainty(facts, safe_facts, f"Kondisyon belirsiz: {fact.source_quote}")
+        elif condition is not None:
+            updates["condition"] = condition
+
+        tooth_fdi = _parse_dental_chart_fdi(item.get("tooth_fdi"), fact)
+        if tooth_fdi is None:
+            updates["tooth_number_fdi"] = None
+            if fact.tooth_number_fdi is not None:
+                _append_dental_chart_uncertainty(
+                    facts,
+                    safe_facts,
+                    f"FDI doğrulaması başarısız: {fact.source_quote}",
+                )
+        else:
+            updates["tooth_number_fdi"] = tooth_fdi
+
+        enriched.append(procedure.model_copy(update=updates) if updates else procedure)
+
+    return enriched
+
+
+def _append_dental_chart_uncertainty(
+    original_facts: ClinicalFactsBundle, safe_facts: ClinicalFactsBundle, message: str
+) -> None:
+    if message not in safe_facts.uncertain_items:
+        safe_facts.uncertain_items.append(message)
+    if message not in original_facts.uncertain_items:
+        original_facts.uncertain_items.append(message)
+
+
+def _build_dental_chart_user_input(fact: ClinicalFact) -> str:
+    payload = {
+        "fact": {
+            "category": fact.category.value,
+            "text": fact.text,
+            "source_role": fact.source_role.value,
+            "tooth_number_fdi": fact.tooth_number_fdi,
+            "status": fact.status.value if fact.status else None,
+            "source_quote": fact.source_quote,
+            "is_uncertain": fact.is_uncertain,
+        }
+    }
+    return "Procedure fact:\n" + json.dumps(payload, ensure_ascii=False)
+
+
+def _loads_llm_json_array(raw_output: str) -> list[object]:
+    data = _loads_llm_json_object(raw_output)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        items = _first_present(data, ("items", "commands", "procedures"), default=[])
+        if isinstance(items, list):
+            return items
+    raise ValueError("dental chart payload array değil")
+
+
+def _normalize_dental_chart_payload(data: list[object]) -> list[dict]:
+    normalized: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            raise ValueError("dental chart item dict değil")
+        normalized.append(
+            {
+                "tooth_fdi": _first_present(item, ("tooth_fdi", "tooth_number_fdi", "fdi"), default=None),
+                "surfaces": _first_present(item, ("surfaces", "surface"), default=None),
+                "condition": _first_present(item, ("condition", "dental_condition"), default=None),
+                "status": _first_present(item, ("status",), default=None),
+                "source_quote": _first_present(item, ("source_quote", "quote"), default=None),
+            }
+        )
+    return normalized
+
+
+def _select_dental_chart_item(items: list[dict], fact: ClinicalFact) -> Optional[dict]:
+    for item in items:
+        quote = item.get("source_quote")
+        if isinstance(quote, str) and quote and quote in fact.source_quote:
+            return item
+    return items[0] if items else None
+
+
+def _parse_tooth_surfaces(value: object) -> Optional[list[ToothSurface]]:
+    if value is None:
+        return None
+    raw_values = value if isinstance(value, list) else [value]
+    surfaces: list[ToothSurface] = []
+    for raw in raw_values:
+        if raw is None:
+            return None
+        try:
+            surface = ToothSurface(str(raw).upper())
+        except ValueError:
+            return None
+        if surface not in surfaces:
+            surfaces.append(surface)
+    return surfaces
+
+
+def _parse_dental_condition(value: object) -> Optional[DentalCondition]:
+    if value is None:
+        return None
+    try:
+        return DentalCondition(str(value).casefold())
+    except ValueError:
+        return None
+
+
+def _parse_dental_chart_fdi(value: object, fact: ClinicalFact) -> Optional[int]:
+    try:
+        candidate = int(value) if value is not None else fact.tooth_number_fdi
+    except (TypeError, ValueError):
+        return None
+    if candidate is None or not _is_valid_fdi(candidate):
+        return None
+    if fact.tooth_number_fdi is not None and candidate != fact.tooth_number_fdi:
+        return None
+    return candidate
 
 
 def _detect_procedure_family(fact: ClinicalFact) -> Optional[str]:
