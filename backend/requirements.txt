@@ -12,6 +12,8 @@ httpx>=0.27
 SQLAlchemy>=2.0
 psycopg[binary]>=3.1
 alembic>=1.13
+PyJWT>=2.8
+bcrypt>=4.1
 
 # --- Eval / test amaçlı (PRODUCTION DEĞİL — bkz. providers/gemini_provider.py) ---
 # CLAUDE.md §6/§10: somut LLM vendor'ı PRODUCTION için hâlâ TBD; Gemini

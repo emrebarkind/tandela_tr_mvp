@@ -515,7 +515,7 @@ export default function ReviewPage() {
     : [];
   const checklist = activeProcedure?.match_results[0]?.checklist ?? [];
   const candidateCodes = activeProcedure?.candidates.map((candidate) => candidate.code) ?? [];
-  const activeTooth = activeProcedure?.procedure.tooth_number_fdi ?? 46;
+  const activeTooth = activeProcedure?.procedure.tooth_number_fdi ? `${activeProcedure.procedure.tooth_number_fdi}` : "Belirsiz";
   const activeProcedureLabel = activeProcedure
     ? procedureLabel(activeProcedure.procedure.procedure_family)
     : "Kanal";

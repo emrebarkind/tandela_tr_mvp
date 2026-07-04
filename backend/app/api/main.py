@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import health_router, router as sessions_router
+from app.api.routes import auth_router, health_router, router as sessions_router
 
 app = FastAPI(title="Tandela TR API", version="0.1.0")
 app.add_middleware(
@@ -16,4 +16,5 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(sessions_router)

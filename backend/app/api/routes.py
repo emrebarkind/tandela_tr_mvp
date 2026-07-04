@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 
+from app.auth import create_access_token, verify_password
 from app.api.audio_pipeline import (
     AudioJobResponse,
     AudioProcessResponse,
@@ -39,6 +41,7 @@ from app.providers.audio_processing import (
 from app.repositories.session_repository import SessionRepository
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+auth_router = APIRouter(prefix="/auth", tags=["auth"])
 health_router = APIRouter(tags=["health"])
 _ENGINE = create_database_engine()
 _SESSION_FACTORY = create_session_factory(_ENGINE)
@@ -80,6 +83,36 @@ def get_session_repository() -> Iterator[SessionRepository]:
         raise
     finally:
         db.close()
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    clinic_id: str
+    user_id: str
+    role: str
+
+
+@auth_router.post("/login", response_model=LoginResponse)
+def login_endpoint(
+    request: LoginRequest,
+    repository: SessionRepository = Depends(get_session_repository),
+) -> LoginResponse:
+    user = repository.find_user_by_email(request.email)
+    if user is None or not verify_password(request.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Email veya şifre hatalı.")
+    token = create_access_token(user_id=user.id, clinic_id=user.clinic_id, role=user.role)
+    return LoginResponse(
+        access_token=token,
+        clinic_id=user.clinic_id,
+        user_id=user.id,
+        role=user.role,
+    )
 
 
 @router.post("", response_model=PipelineReviewResponse)

@@ -27,11 +27,16 @@ HARD RULES:
    patient_complaint or history.
 3. Do not drop patient worries. If the patient asks or worries about a diagnosis
    ("iltihapli mi?"), keep it as patient_complaint/history, not as a finding.
+   Patient questions/worries are not clinical uncertainty; keep
+   `is_uncertain=false` unless the patient wording itself is unclear.
 4. Assistant/other speech cannot create clinical_findings, assessment,
    treatment_plan, or procedures. If clinically relevant but not dentist-sourced,
    put the concern in uncertain_items; do not make it a structured clinical fact.
 5. Preserve epistemic uncertainty. Words like "supheli", "olabilir",
    "gerekebilir", "degerlendirecegiz" must not become certain.
+   Dentist interpretation phrases like "kanal tedavisi gerekebilir",
+   "supheli", "degerlendirecegiz" should be `assessment` with
+   `is_uncertain=true`, not a definite diagnosis.
 6. Output procedure facts explicitly. If the dentist mentions a procedure
    family (kanal tedavisi, kompozit dolgu, gecici restorasyon, cekim, etc.),
    output a `procedures` fact for that procedure when the transcript supports
@@ -50,6 +55,8 @@ HARD RULES:
    or hedged numbers ("yirmi alti mi", "tam okunmuyor").
 9. Each source_quote must be copied exactly from one utterance. Keep it short
    but sufficient. Do not paraphrase source_quote.
+   If one dentist utterance contains linked findings or linked plan clauses,
+   keep the linked clauses in one fact/source_quote instead of splitting them.
 10. Output JSON only. No prose, no markdown, no explanation outside the JSON.
    Use EXACTLY this top-level shape:
 
@@ -72,6 +79,8 @@ HARD RULES:
    }
 
    Optional fields may be null. Do not output confidence scores.
+   Do not omit any object key shown above; every fact must include
+   `source_speaker` copied from the utterance speaker_id.
 
 CATEGORY GUIDANCE:
 - patient_complaint: patient symptoms, pain, worries, lay questions.
@@ -81,7 +90,9 @@ CATEGORY GUIDANCE:
 - clinical_findings includes observed/radiographic statements such as
   "curuk goruyorum", "hassasiyet var", "radyografide/periapikal bolgede
   supheli goruntu var". Preserve uncertainty with is_uncertain=true.
-- assessment: dentist diagnostic impression only, not simple observed findings.
+- assessment: dentist diagnostic impression or clinical interpretation,
+  including uncertain comments such as "kanal tedavisi gerekebilir",
+  "supheli", and "degerlendirecegiz" with `is_uncertain=true`.
 - treatment_plan: dentist plan or next step only.
 - procedures: dentist-stated current-session or planned procedure object only.
 
@@ -89,11 +100,15 @@ IMPORTANT EDGE CASES:
 - "Benim disim iltihapli mi?" is a patient concern/question, not infection.
 - "supheli bir goruntu var" remains uncertain; do not write a definite lesion.
 - "Rontgene gore periapikal bolgede supheli bir goruntu var" is a
-  clinical_findings fact with is_uncertain=true, not a definite assessment.
+  clinical_findings fact with is_uncertain=true; if framed as interpretation,
+  it may also be an assessment fact with is_uncertain=true.
 - "Kanal tedavisi planlandi" should produce a treatment_plan fact and also a
   procedures fact with status planned.
 - "Bugun gecici dolgu yapip ... yapilacak" is conflicting. Procedure status is
-  unclear, is_uncertain=true, and uncertain_items should mention the conflict.
+  unclear, is_uncertain=true, and uncertain_items should mention the conflict
+  using the word "celiski" or "celiskili".
+  Do not also output a separate planned/performed temporary restoration fact
+  from the later "gecici restorasyon yapilacak" wording in the same scenario.
 - "yirmi alti mi, tam okunmuyor" must not become tooth_number_fdi=26.
 - "Iki yuzlu kompozit dolgu" supports a performed procedures fact, but if exact
   surface names are absent, add uncertain_items noting that the two surfaces are
@@ -101,6 +116,9 @@ IMPORTANT EDGE CASES:
 - "gecen sene kanal tedavisi yapilmisti" from the patient is history, not a
   current-session procedure.
 - "cekim gundemde degil" means extraction is not in the plan.
+- "36 numarada eski kanal tedavisi mevcut, periapikalde genisleme var" is one
+  linked clinical_findings fact. "Simdilik retreatment planliyoruz, cekim
+  gundemde degil" is one linked treatment_plan fact.
 ```
 
 ## Input format

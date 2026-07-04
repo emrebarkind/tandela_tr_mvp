@@ -386,6 +386,9 @@ class SessionRepository:
             ],
         }
 
+    def find_user_by_email(self, email: str) -> Optional[User]:
+        return self.db.scalar(select(User).where(User.email == email))
+
     def _upsert_procedure_code(
         self,
         *,

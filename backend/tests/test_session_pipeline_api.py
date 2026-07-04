@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from app.auth import hash_password
 from app.api.main import app
 from app.api.routes import get_llm_provider, get_session_repository
 from app.api.session_pipeline import (
@@ -19,7 +21,16 @@ from app.api.session_pipeline import (
     resume_transcript_after_role_review,
     to_review_response,
 )
-from app.pipeline.types import ClinicalNoteDraft, DentistRole, NoteSentence, PipelineStatus
+from app.pipeline.types import (
+    ClinicalNoteDraft,
+    CodeSuggestionBundle,
+    DentistRole,
+    NoteSentence,
+    PipelineResult,
+    PipelineStatus,
+    ProcedureObject,
+    ProcedureStatus,
+)
 from app.providers.audio_processing import (
     AudioProviderConfigurationError,
     AudioProviderRuntimeError,
@@ -461,6 +472,29 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertEqual(response.export_payload.selected_codes, ["FIX-KANAL-2K"])
         self.assertEqual(response.export_payload.audit.reviewer_user_id, "doctor-1")
 
+    def test_review_response_preserves_dynamic_tooth_number_for_frontend_chart(self) -> None:
+        note = ClinicalNoteDraft(session_id="chart-44")
+        result = PipelineResult(
+            session_id="chart-44",
+            status=PipelineStatus.AWAITING_DENTIST_REVIEW,
+            clinical_note=note,
+            procedures=[
+                ProcedureObject(
+                    procedure_family="kanal_tedavisi",
+                    tooth_number_fdi=44,
+                    status=ProcedureStatus.PLANNED,
+                    source_quotes=["44 numara için kanal tedavisi planlandı"],
+                )
+            ],
+            code_suggestions=[CodeSuggestionBundle(session_id="chart-44")],
+            stopped_at_stage="dentist_review",
+        )
+
+        response = to_review_response(result)
+
+        self.assertIsNotNone(response.dentist_review)
+        self.assertEqual(response.dentist_review.procedures[0].procedure.tooth_number_fdi, 44)
+
     def test_audio_process_route_deletes_raw_audio_when_provider_not_configured(self) -> None:
         client = TestClient(app)
 
@@ -621,6 +655,36 @@ class SessionPipelineApiTests(unittest.TestCase):
             response = client.get("/sessions/audio/jobs/missing-job")
 
         self.assertEqual(response.status_code, 401)
+
+    def test_login_returns_jwt_and_sessions_accept_bearer_token(self) -> None:
+        class StubRepository:
+            def find_user_by_email(self, email):  # noqa: ANN001, ANN201
+                if email != "dentist@test.tandela":
+                    return None
+                return SimpleNamespace(
+                    id="doctor-jwt",
+                    clinic_id="clinic-jwt",
+                    role="dentist",
+                    password_hash=hash_password("secret-pass"),
+                )
+
+        app.dependency_overrides[get_session_repository] = lambda: StubRepository()
+        client = TestClient(app)
+
+        with patch.dict("os.environ", {"TANDELA_AUTH_MODE": "jwt", "SECRET_KEY": "test-secret"}):
+            login = client.post(
+                "/auth/login",
+                json={"email": "dentist@test.tandela", "password": "secret-pass"},
+            )
+            self.assertEqual(login.status_code, 200)
+            token = login.json()["access_token"]
+
+            authed = client.get(
+                "/sessions/audio/jobs/missing-job",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        self.assertEqual(authed.status_code, 404)
 
     def test_audio_provider_factory_defaults_to_safe_not_configured_provider(self) -> None:
         with patch.dict("os.environ", {"TANDELA_AUDIO_PROVIDER": "not_configured"}):
