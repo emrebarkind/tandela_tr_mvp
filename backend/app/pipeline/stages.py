@@ -49,8 +49,11 @@ from app.pipeline.types import (
     ProcedureStatus,
     SurfaceCount,
     ToothSurface,
+    TreatmentKind,
     CanalCount,
     CodeSuggestionBundle,
+    derive_fdi_classification,
+    is_valid_fdi_number,
 )
 from app.prompts.loader import load_system_prompt
 from app.providers.audio_processing import AudioProcessingProvider
@@ -580,8 +583,7 @@ def _normalize_validated_clinical_facts(
 
 
 def _is_valid_fdi(tooth_number: int) -> bool:
-    quadrant, tooth = divmod(tooth_number, 10)
-    return quadrant in (1, 2, 3, 4) and 1 <= tooth <= 8
+    return is_valid_fdi_number(tooth_number)
 
 
 def _fail_safe_clinical_facts(session_id: str) -> ClinicalFactsBundle:
@@ -733,12 +735,18 @@ def extract_procedures(facts: ClinicalFactsBundle) -> list[ProcedureObject]:
         if procedure_family is None:
             continue
 
+        tooth_number_fdi = fact.tooth_number_fdi if _is_valid_optional_fdi(fact.tooth_number_fdi) else None
+        dentition, tooth_type, tooth_group = derive_fdi_classification(tooth_number_fdi)
         procedures.append(
             ProcedureObject(
                 procedure_family=procedure_family,
-                tooth_number_fdi=fact.tooth_number_fdi if _is_valid_optional_fdi(fact.tooth_number_fdi) else None,
+                tooth_number_fdi=tooth_number_fdi,
+                dentition=dentition,
+                tooth_type=tooth_type,
+                tooth_group=tooth_group,
                 surface_count=_detect_surface_count(fact),
                 canal_count=_detect_canal_count(fact) if procedure_family == "kanal_tedavisi" else None,
+                treatment_kind=_detect_treatment_kind(fact) if procedure_family == "kanal_tedavisi" else None,
                 status=fact.status or ProcedureStatus.UNCLEAR,
                 source_quotes=[fact.source_quote],
             )
@@ -817,6 +825,9 @@ def extract_dental_chart_commands(
         tooth_fdi = _parse_dental_chart_fdi(item.get("tooth_fdi"), fact)
         if tooth_fdi is None:
             updates["tooth_number_fdi"] = None
+            updates["dentition"] = None
+            updates["tooth_type"] = None
+            updates["tooth_group"] = None
             if fact.tooth_number_fdi is not None:
                 _append_dental_chart_uncertainty(
                     facts,
@@ -824,7 +835,11 @@ def extract_dental_chart_commands(
                     f"FDI doğrulaması başarısız: {fact.source_quote}",
                 )
         else:
+            dentition, tooth_type, tooth_group = derive_fdi_classification(tooth_fdi)
             updates["tooth_number_fdi"] = tooth_fdi
+            updates["dentition"] = dentition
+            updates["tooth_type"] = tooth_type
+            updates["tooth_group"] = tooth_group
 
         enriched.append(procedure.model_copy(update=updates) if updates else procedure)
 
@@ -997,6 +1012,23 @@ def _detect_canal_count(fact: ClinicalFact) -> CanalCount | None:
     if _has_any(text, ("kanal tedavisi", "endodontik tedavi")):
         return CanalCount.UNCLEAR
     return None
+
+
+def _detect_treatment_kind(fact: ClinicalFact) -> TreatmentKind:
+    text = _procedure_text(fact)
+    if _has_any(
+        text,
+        (
+            "retreatment",
+            "yeniden kanal",
+            "kanal yenile",
+            "kanal tedavisi yenile",
+            "revizyon",
+            "tekrar kanal",
+        ),
+    ):
+        return TreatmentKind.RETREATMENT
+    return TreatmentKind.INITIAL
 
 
 def _procedure_text(fact: ClinicalFact) -> str:

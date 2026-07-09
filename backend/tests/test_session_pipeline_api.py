@@ -240,11 +240,9 @@ class SessionPipelineApiTests(unittest.TestCase):
                 ],
                 {
                     "explanations": [
-                        {"code": "FIX-KANAL-1K", "fit_reason": "Aday listesinde.", "caveat": None},
-                        {"code": "FIX-KANAL-2K", "fit_reason": "Aday listesinde.", "caveat": None},
-                        {"code": "FIX-KANAL-3K", "fit_reason": "Aday listesinde.", "caveat": None},
+                        {"code": "END330", "fit_reason": "46 daimi molar olduğu için aday.", "caveat": "Kanal sayısı dokümantasyon için kontrol edilmeli."},
                     ],
-                    "ambiguity_note": "Kanal sayısı net değil.",
+                    "ambiguity_note": None,
                     "dentist_must_choose": True,
                 },
             ]
@@ -298,7 +296,7 @@ class SessionPipelineApiTests(unittest.TestCase):
         approve_response = client.post(
             "/sessions/phase-b-loop/approve",
             headers=AUTH_HEADERS,
-            json={"selected_codes": ["FIX-KANAL-2K"], "approved": True},
+            json={"selected_codes": ["END330"], "approved": True},
         )
 
         self.assertEqual(approve_response.status_code, 200)
@@ -306,7 +304,7 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertEqual(approve_payload["review_state"], "approved_ready_for_export")
         self.assertEqual(approve_payload["next_action"], "export")
         self.assertIn("46 numarada derin çürük görüyorum.", approve_payload["export_payload"]["clinical_note_text"])
-        self.assertEqual(approve_payload["export_payload"]["selected_codes"], ["FIX-KANAL-2K"])
+        self.assertEqual(approve_payload["export_payload"]["selected_codes"], ["END330"])
 
     def test_resume_after_role_review_runs_to_dentist_review(self) -> None:
         request = TranscriptResumeAfterRoleReviewRequest(
@@ -383,11 +381,9 @@ class SessionPipelineApiTests(unittest.TestCase):
                 ],
                 {
                     "explanations": [
-                        {"code": "FIX-KANAL-1K", "fit_reason": "Aday listesinde.", "caveat": None},
-                        {"code": "FIX-KANAL-2K", "fit_reason": "Aday listesinde.", "caveat": None},
-                        {"code": "FIX-KANAL-3K", "fit_reason": "Aday listesinde.", "caveat": None},
+                        {"code": "END330", "fit_reason": "46 daimi molar olduğu için aday.", "caveat": "Kanal sayısı dokümantasyon için kontrol edilmeli."},
                     ],
-                    "ambiguity_note": "Kanal sayısı net değil.",
+                    "ambiguity_note": None,
                     "dentist_must_choose": True,
                 },
             ]
@@ -400,15 +396,15 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertIsNotNone(result.clinical_facts)
         self.assertIsNotNone(result.clinical_note)
         self.assertEqual(result.procedures[0].procedure_family, "kanal_tedavisi")
-        self.assertEqual(len(result.code_suggestions[0].candidates), 3)
-        self.assertEqual(len(result.code_suggestions[0].explanations), 3)
+        self.assertEqual(len(result.code_suggestions[0].candidates), 1)
+        self.assertEqual(len(result.code_suggestions[0].explanations), 1)
 
         response = to_review_response(result)
         self.assertEqual(response.next_action, "review_note_and_codes")
         self.assertIsNone(response.role_review)
         self.assertIsNotNone(response.dentist_review)
         self.assertEqual(len(response.dentist_review.procedures), 1)
-        self.assertEqual(len(response.dentist_review.procedures[0].candidates), 3)
+        self.assertEqual(len(response.dentist_review.procedures[0].candidates), 1)
 
     def test_resume_after_role_review_blocks_when_correction_omits_speaker(self) -> None:
         request = TranscriptResumeAfterRoleReviewRequest(
@@ -455,7 +451,7 @@ class SessionPipelineApiTests(unittest.TestCase):
         result = approve_review(
             ApproveReviewRequest(
                 session_id="api-approve",
-                selected_codes=["FIX-KANAL-2K"],
+                selected_codes=["END330"],
                 reviewer_user_id="doctor-1",
                 approved_note=note,
             )
@@ -469,7 +465,7 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertEqual(response.next_action, "export")
         self.assertIsNotNone(response.export_payload)
         self.assertIn("46 numarada derin çürük görüyorum.", response.export_payload.clinical_note_text)
-        self.assertEqual(response.export_payload.selected_codes, ["FIX-KANAL-2K"])
+        self.assertEqual(response.export_payload.selected_codes, ["END330"])
         self.assertEqual(response.export_payload.audit.reviewer_user_id, "doctor-1")
 
     def test_review_response_preserves_dynamic_tooth_number_for_frontend_chart(self) -> None:
@@ -634,7 +630,7 @@ class SessionPipelineApiTests(unittest.TestCase):
             headers=AUTH_HEADERS,
             json={
                 "session_id": "auth-approve",
-                "selected_codes": ["FIX-KANAL-2K"],
+                "selected_codes": ["END330"],
                 "reviewer_user_id": "body-user-should-not-win",
                 "approved": True,
                 "approved_note": note.model_dump(mode="json"),

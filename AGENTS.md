@@ -178,12 +178,12 @@ hekimlerle yazılıp panelde kilitlenir (`authored_by` ile işaretli).
 
 ### Kod sistemi / Medula / entegrasyon (netleşen kararlar)
 
-- **Kod kaynağı AÇIK KARAR, segmente bağlı.** Gözlemlenen hastane (Medipol
-  HSYS) SUT kodları kullanıyor (örn. P403306, 404220), TDB Rehber Tarife
-  değil — özel hastane bile Medula'ya SUT'la kodlar. Küçük özel klinik
-  (SGK'sız) TDB kullanabilir. Hedef segment kararı V1 kod kaynağını belirler;
-  kod DB zaten soyut → kaynak (TDB/SUT) parametrik tutulmalı, koda
-  gömülmemeli.
+- **V1 birincil kod sistemi KİLİTLENDİ:** TDB Dental İşlem Kodları ve
+  Açıklamaları (ODR/RES/END/PER/PRH/IMP/PRS/CRH/ORT/YGH formatı) birincil kod
+  eşleştirme kaynağıdır. TDB Rehber Tarife (2-27 formatı) yalnızca fiyat
+  referansı olarak ikincil kalabilir; kod eşleştirmenin birincil kaynağı
+  değildir. `required_documentation` hâlâ klinik uzmanlıkla doldurulacak;
+  transkriptten veya fiyat tarifesinden uydurulmayacak.
 - **Medula konumlanması.** Ürün Medula'ya DOĞRUDAN bağlanmaz (SGK
   yetkilendirmesi + mevcut HBYS işi gerekir). Değer = Medula'ya gidecek doğru
   SUT kodunu hekim adına hazırlamak; gönderimi klinik kendi HBYS'siyle yapar.

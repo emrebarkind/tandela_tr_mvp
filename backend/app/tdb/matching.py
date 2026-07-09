@@ -21,11 +21,15 @@ from app.pipeline.types import (
     CodeMatchResult,
     CodeMatchState,
     CodeSuggestionBundle,
+    Dentition,
     DentistRole,
     FactCategory,
     ProcedureObject,
     ProcedureStatus,
     SurfaceCount,
+    ToothGroup,
+    ToothType,
+    TreatmentKind,
 )
 from app.prompts.loader import load_system_prompt
 from app.providers.llm import LLMProvider
@@ -34,8 +38,8 @@ logger = logging.getLogger(__name__)
 
 CODE_EXPLANATION_PROMPT_FILE = "code_explanation.md"
 
-_CODE_FIXTURE_SOURCE = "Fixture placeholder - real TDB/SUT code source TBD"
-_CODE_FIXTURE_VERSION = "fixture-v1"
+_CODE_FIXTURE_SOURCE = "TDB Dental İşlem Kodları ve Açıklamaları"
+_CODE_FIXTURE_VERSION = "2023"
 
 _CODE_DB_FIXTURE = [
     {
@@ -78,39 +82,144 @@ _CODE_DB_FIXTURE = [
         ],
     },
     {
-        "code": "FIX-KANAL-1K",
-        "procedure_name": "Kanal Tedavisi (Tek Kanal)",
-        "category": "Tedavi ve Endodonti",
-        "match_keys": {"procedure_family": "kanal_tedavisi", "canal_count": CanalCount.ONE_CANAL},
+        "code": "END230",
+        "procedure_name": "Süt anterior dişte endodontik tedavi",
+        "category": "Endodonti",
+        "match_keys": {
+            "procedure_family": "kanal_tedavisi",
+            "dentition": Dentition.PRIMARY,
+            "tooth_group": ToothGroup.ANTERIOR,
+            "treatment_kind": TreatmentKind.INITIAL,
+        },
         "required_documentation": [
             {"item_id": "tooth_number", "label": "Diş numarası (FDI)", "severity": "required"},
-            {"item_id": "canal_count", "label": "Kanal sayısı", "severity": "required"},
+            {"item_id": "kanal_sayisi_belirtildi_mi", "label": "Kanal sayısı belirtildi mi?", "severity": "recommended"},
             {"item_id": "endo_diagnosis", "label": "Endodontik tanı/gerekçe", "severity": "required"},
             {"item_id": "radiograph", "label": "Röntgen bulgusu", "severity": "recommended"},
             {"item_id": "status", "label": "İşlem durumu", "severity": "required"},
         ],
     },
     {
-        "code": "FIX-KANAL-2K",
-        "procedure_name": "Kanal Tedavisi (İki Kanal)",
-        "category": "Tedavi ve Endodonti",
-        "match_keys": {"procedure_family": "kanal_tedavisi", "canal_count": CanalCount.TWO_CANAL},
+        "code": "END240",
+        "procedure_name": "Süt posterior dişte endodontik tedavi",
+        "category": "Endodonti",
+        "match_keys": {
+            "procedure_family": "kanal_tedavisi",
+            "dentition": Dentition.PRIMARY,
+            "tooth_group": ToothGroup.POSTERIOR,
+            "treatment_kind": TreatmentKind.INITIAL,
+        },
         "required_documentation": [
             {"item_id": "tooth_number", "label": "Diş numarası (FDI)", "severity": "required"},
-            {"item_id": "canal_count", "label": "Kanal sayısı", "severity": "required"},
+            {"item_id": "kanal_sayisi_belirtildi_mi", "label": "Kanal sayısı belirtildi mi?", "severity": "recommended"},
             {"item_id": "endo_diagnosis", "label": "Endodontik tanı/gerekçe", "severity": "required"},
             {"item_id": "radiograph", "label": "Röntgen bulgusu", "severity": "recommended"},
             {"item_id": "status", "label": "İşlem durumu", "severity": "required"},
         ],
     },
     {
-        "code": "FIX-KANAL-3K",
-        "procedure_name": "Kanal Tedavisi (Üç Kanal)",
-        "category": "Tedavi ve Endodonti",
-        "match_keys": {"procedure_family": "kanal_tedavisi", "canal_count": CanalCount.THREE_CANAL},
+        "code": "END310",
+        "procedure_name": "Anterior dişte endodontik tedavi (daimi dolgusu hariç)",
+        "category": "Endodonti",
+        "match_keys": {
+            "procedure_family": "kanal_tedavisi",
+            "dentition": Dentition.PERMANENT,
+            "tooth_type": ToothType.ANTERIOR,
+            "treatment_kind": TreatmentKind.INITIAL,
+        },
         "required_documentation": [
             {"item_id": "tooth_number", "label": "Diş numarası (FDI)", "severity": "required"},
-            {"item_id": "canal_count", "label": "Kanal sayısı", "severity": "required"},
+            {"item_id": "kanal_sayisi_belirtildi_mi", "label": "Kanal sayısı belirtildi mi?", "severity": "recommended"},
+            {"item_id": "endo_diagnosis", "label": "Endodontik tanı/gerekçe", "severity": "required"},
+            {"item_id": "radiograph", "label": "Röntgen bulgusu", "severity": "recommended"},
+            {"item_id": "status", "label": "İşlem durumu", "severity": "required"},
+        ],
+    },
+    {
+        "code": "END320",
+        "procedure_name": "Premolar dişte endodontik tedavi (daimi dolgusu hariç)",
+        "category": "Endodonti",
+        "match_keys": {
+            "procedure_family": "kanal_tedavisi",
+            "dentition": Dentition.PERMANENT,
+            "tooth_type": ToothType.PREMOLAR,
+            "treatment_kind": TreatmentKind.INITIAL,
+        },
+        "required_documentation": [
+            {"item_id": "tooth_number", "label": "Diş numarası (FDI)", "severity": "required"},
+            {"item_id": "kanal_sayisi_belirtildi_mi", "label": "Kanal sayısı belirtildi mi?", "severity": "recommended"},
+            {"item_id": "endo_diagnosis", "label": "Endodontik tanı/gerekçe", "severity": "required"},
+            {"item_id": "radiograph", "label": "Röntgen bulgusu", "severity": "recommended"},
+            {"item_id": "status", "label": "İşlem durumu", "severity": "required"},
+        ],
+    },
+    {
+        "code": "END330",
+        "procedure_name": "Molar dişte endodontik tedavi (daimi dolgusu hariç)",
+        "category": "Endodonti",
+        "match_keys": {
+            "procedure_family": "kanal_tedavisi",
+            "dentition": Dentition.PERMANENT,
+            "tooth_type": ToothType.MOLAR,
+            "treatment_kind": TreatmentKind.INITIAL,
+        },
+        "required_documentation": [
+            {"item_id": "tooth_number", "label": "Diş numarası (FDI)", "severity": "required"},
+            {"item_id": "kanal_sayisi_belirtildi_mi", "label": "Kanal sayısı belirtildi mi?", "severity": "recommended"},
+            {"item_id": "endo_diagnosis", "label": "Endodontik tanı/gerekçe", "severity": "required"},
+            {"item_id": "radiograph", "label": "Röntgen bulgusu", "severity": "recommended"},
+            {"item_id": "status", "label": "İşlem durumu", "severity": "required"},
+        ],
+    },
+    {
+        "code": "END346",
+        "procedure_name": "Anterior dişte endodontik tedavi yenileme",
+        "category": "Endodonti",
+        "match_keys": {
+            "procedure_family": "kanal_tedavisi",
+            "dentition": Dentition.PERMANENT,
+            "tooth_type": ToothType.ANTERIOR,
+            "treatment_kind": TreatmentKind.RETREATMENT,
+        },
+        "required_documentation": [
+            {"item_id": "tooth_number", "label": "Diş numarası (FDI)", "severity": "required"},
+            {"item_id": "kanal_sayisi_belirtildi_mi", "label": "Kanal sayısı belirtildi mi?", "severity": "recommended"},
+            {"item_id": "endo_diagnosis", "label": "Endodontik tanı/gerekçe", "severity": "required"},
+            {"item_id": "radiograph", "label": "Röntgen bulgusu", "severity": "recommended"},
+            {"item_id": "status", "label": "İşlem durumu", "severity": "required"},
+        ],
+    },
+    {
+        "code": "END347",
+        "procedure_name": "Premolar dişte endodontik tedavi yenileme",
+        "category": "Endodonti",
+        "match_keys": {
+            "procedure_family": "kanal_tedavisi",
+            "dentition": Dentition.PERMANENT,
+            "tooth_type": ToothType.PREMOLAR,
+            "treatment_kind": TreatmentKind.RETREATMENT,
+        },
+        "required_documentation": [
+            {"item_id": "tooth_number", "label": "Diş numarası (FDI)", "severity": "required"},
+            {"item_id": "kanal_sayisi_belirtildi_mi", "label": "Kanal sayısı belirtildi mi?", "severity": "recommended"},
+            {"item_id": "endo_diagnosis", "label": "Endodontik tanı/gerekçe", "severity": "required"},
+            {"item_id": "radiograph", "label": "Röntgen bulgusu", "severity": "recommended"},
+            {"item_id": "status", "label": "İşlem durumu", "severity": "required"},
+        ],
+    },
+    {
+        "code": "END348",
+        "procedure_name": "Molar dişte endodontik tedavi yenileme",
+        "category": "Endodonti",
+        "match_keys": {
+            "procedure_family": "kanal_tedavisi",
+            "dentition": Dentition.PERMANENT,
+            "tooth_type": ToothType.MOLAR,
+            "treatment_kind": TreatmentKind.RETREATMENT,
+        },
+        "required_documentation": [
+            {"item_id": "tooth_number", "label": "Diş numarası (FDI)", "severity": "required"},
+            {"item_id": "kanal_sayisi_belirtildi_mi", "label": "Kanal sayısı belirtildi mi?", "severity": "recommended"},
             {"item_id": "endo_diagnosis", "label": "Endodontik tanı/gerekçe", "severity": "required"},
             {"item_id": "radiograph", "label": "Röntgen bulgusu", "severity": "recommended"},
             {"item_id": "status", "label": "İşlem durumu", "severity": "required"},
@@ -277,8 +386,6 @@ def _find_candidate_records(procedure: ProcedureObject) -> list[dict]:
 
     if procedure.surface_count == SurfaceCount.UNCLEAR:
         return family_records
-    if procedure.canal_count == CanalCount.UNCLEAR:
-        return family_records
     return []
 
 
@@ -288,7 +395,13 @@ def _record_matches_procedure(record: dict, procedure: ProcedureObject) -> bool:
         return False
     if "surface_count" in match_keys and procedure.surface_count != match_keys["surface_count"]:
         return False
-    if "canal_count" in match_keys and procedure.canal_count != match_keys["canal_count"]:
+    if "dentition" in match_keys and procedure.dentition != match_keys["dentition"]:
+        return False
+    if "tooth_type" in match_keys and procedure.tooth_type != match_keys["tooth_type"]:
+        return False
+    if "tooth_group" in match_keys and procedure.tooth_group != match_keys["tooth_group"]:
+        return False
+    if "treatment_kind" in match_keys and procedure.treatment_kind != match_keys["treatment_kind"]:
         return False
     return True
 
@@ -329,7 +442,7 @@ def _evaluate_checklist_item(
             return _checklist_found(item_id, label, evidence)
         return _checklist_missing(item_id, label)
 
-    if item_id == "canal_count":
+    if item_id in ("kanal_sayisi_belirtildi_mi", "canal_count"):
         if procedure.canal_count in (CanalCount.ONE_CANAL, CanalCount.TWO_CANAL, CanalCount.THREE_CANAL):
             return _checklist_found(item_id, label, _first_source_quote(procedure))
         if procedure.canal_count == CanalCount.UNCLEAR:
@@ -397,13 +510,19 @@ def _determine_match_state(candidate_count: int, checklist: list[ChecklistItemRe
 
 def _ambiguity_note(procedure: ProcedureObject, candidates: list[dict]) -> Optional[str]:
     if not candidates:
+        if procedure.procedure_family == "kanal_tedavisi" and procedure.tooth_number_fdi is None:
+            return "FDI diş numarası net olmadığı için END adayları seçilemedi; hekim manuel değerlendirmeli."
+        if procedure.procedure_family == "kanal_tedavisi" and (
+            procedure.dentition is None
+            or procedure.tooth_group is None
+            or (procedure.dentition == Dentition.PERMANENT and procedure.tooth_type is None)
+        ):
+            return "FDI diş tipi sınıflandırılamadığı için END adayları seçilemedi; hekim manuel değerlendirmeli."
         return "Kapalı fixture code DB içinde eşleşen aday yok; hekim manuel değerlendirmeli."
     if len(candidates) <= 1:
         return None
     if procedure.surface_count == SurfaceCount.UNCLEAR:
         return "Yüzey sayısı net değil; birden çok kompozit dolgu adayı hekim seçimi gerektirir."
-    if procedure.canal_count == CanalCount.UNCLEAR:
-        return "Kanal sayısı net değil; birden çok kanal tedavisi adayı hekim seçimi gerektirir."
     return "Birden çok aday bulundu; hekim seçim yapmalı."
 
 

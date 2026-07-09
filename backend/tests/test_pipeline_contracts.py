@@ -11,14 +11,18 @@ from app.pipeline.types import (
     ClinicalFact,
     ClinicalFactsBundle,
     DentalCondition,
+    Dentition,
     DentistRole,
     FactCategory,
     ProcedureStatus,
     RoleStatus,
     SpeakerLabelledTranscript,
     SurfaceCount,
+    ToothGroup,
     ToothSurface,
+    ToothType,
     Utterance,
+    derive_fdi_classification,
 )
 from app.providers.gemini_audio_provider import normalize_gemini_audio_response
 from app.providers.llm import LLMProvider
@@ -179,7 +183,23 @@ class PipelineContractTests(unittest.TestCase):
         self.assertEqual(checklist["surface_names"], ChecklistItemStatus.MISSING)
         self.assertEqual(checklist["indication"], ChecklistItemStatus.FOUND)
 
-    def test_canal_count_ambiguity_returns_all_canal_candidates(self) -> None:
+    def test_fdi_classification_accepts_permanent_and_primary_ranges(self) -> None:
+        cases = {
+            11: (Dentition.PERMANENT, ToothType.ANTERIOR, ToothGroup.ANTERIOR),
+            45: (Dentition.PERMANENT, ToothType.PREMOLAR, ToothGroup.POSTERIOR),
+            47: (Dentition.PERMANENT, ToothType.MOLAR, ToothGroup.POSTERIOR),
+            52: (Dentition.PRIMARY, ToothType.ANTERIOR, ToothGroup.ANTERIOR),
+            84: (Dentition.PRIMARY, ToothType.MOLAR, ToothGroup.POSTERIOR),
+            19: (None, None, None),
+            50: (None, None, None),
+        }
+
+        for tooth_number, expected in cases.items():
+            with self.subTest(tooth_number=tooth_number):
+                self.assertEqual(derive_fdi_classification(tooth_number), expected)
+                self.assertEqual(stages._is_valid_fdi(tooth_number), expected[0] is not None)
+
+    def test_endodontic_matching_uses_fdi_tooth_type_not_canal_count(self) -> None:
         facts = ClinicalFactsBundle(
             session_id="endo-ambiguous",
             facts=[
@@ -205,13 +225,14 @@ class PipelineContractTests(unittest.TestCase):
 
         procedures = stages.extract_procedures(facts)
         bundles = stages.match_codes_and_checklist(procedures, facts)
+        checklist = {item.item_id: item.status for item in bundles[0].match_results[0].checklist}
 
         self.assertEqual(procedures[0].canal_count, CanalCount.UNCLEAR)
-        self.assertEqual({candidate.code for candidate in bundles[0].candidates}, {
-            "FIX-KANAL-1K",
-            "FIX-KANAL-2K",
-            "FIX-KANAL-3K",
-        })
+        self.assertEqual(procedures[0].dentition, Dentition.PERMANENT)
+        self.assertEqual(procedures[0].tooth_type, ToothType.MOLAR)
+        self.assertEqual(procedures[0].tooth_group, ToothGroup.POSTERIOR)
+        self.assertEqual([candidate.code for candidate in bundles[0].candidates], ["END330"])
+        self.assertEqual(checklist["kanal_sayisi_belirtildi_mi"], ChecklistItemStatus.REVIEW)
         self.assertTrue(bundles[0].dentist_must_choose)
 
     def test_dental_chart_extraction_adds_surface_and_condition_without_guessing(self) -> None:
@@ -279,7 +300,7 @@ class PipelineContractTests(unittest.TestCase):
         procedures = stages.extract_procedures(facts)
         bundles = stages.match_codes_and_checklist(procedures, facts, llm)
 
-        self.assertEqual(len(bundles[0].candidates), 3)
+        self.assertEqual([candidate.code for candidate in bundles[0].candidates], ["END330"])
         self.assertEqual(bundles[0].explanations, [])
 
     def test_gemini_audio_normalizes_role_like_speaker_labels(self) -> None:

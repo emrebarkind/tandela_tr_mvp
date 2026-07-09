@@ -65,7 +65,7 @@ deterministic_dentist_must_choose:
 {
   "explanations": [
     {
-      "code": "FIX-KANAL-1K",
+      "code": "END310",
       "fit_reason": "Kanal tedavisi adayidir; ancak kanal sayisi net degildir.",
       "caveat": "Kanal sayisi hekim tarafindan secilmelidir."
     }

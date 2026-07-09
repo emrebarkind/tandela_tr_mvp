@@ -49,7 +49,7 @@ class SessionRepositoryTests(unittest.TestCase):
             export = ExportPayloadOut(
                 session_id="persist-s1",
                 clinical_note_text="Klinik bulgular\n- 46 numarada derin çürük görüyorum.",
-                selected_codes=["FIX-KANAL-2K"],
+                selected_codes=["END330"],
                 audit=ExportAuditOut(
                     reviewer_user_id="doctor-1",
                     approved=True,
@@ -68,7 +68,7 @@ class SessionRepositoryTests(unittest.TestCase):
             repo.save_review_approval(
                 "persist-s1",
                 approved=True,
-                selected_codes=["FIX-KANAL-2K"],
+                selected_codes=["END330"],
                 reviewer_user_id="doctor-1",
                 export_payload=export,
                 clinic_id="clinic-1",
@@ -102,7 +102,7 @@ class SessionRepositoryTests(unittest.TestCase):
                     AuditLog.action == "export_payload_created",
                 )
             )
-            self.assertEqual(export_audit.metadata_json["selected_codes"], ["FIX-KANAL-2K"])
+            self.assertEqual(export_audit.metadata_json["selected_codes"], ["END330"])
             self.assertIsNotNone(repo.get_session("persist-s1", clinic_id="clinic-1"))
             self.assertIsNone(repo.get_session("persist-s1", clinic_id="other-clinic"))
         finally:

@@ -223,7 +223,7 @@ class ClinicalFact(BaseModel):
     # source_speaker + source_quote taşır (Optional DEĞİL; provenance'sız fact yok).
     source_role: DentistRole
     source_speaker: str  # diarization speaker_id (örn. "A"/"B"), rol ataması SONRASI bile saklanır
-    tooth_number_fdi: Optional[int] = None  # doğrulanmış FDI (11–48), yoksa None
+    tooth_number_fdi: Optional[int] = None  # doğrulanmış FDI (11–48 veya 51–85), yoksa None
     status: Optional[ProcedureStatus] = None
     is_uncertain: bool = False  # "şüpheli/gerekebilir/olabilir" → True, asla kesinleştirilmez
 
@@ -307,13 +307,78 @@ class CanalCount(str, Enum):
     UNCLEAR = "unclear"
 
 
+class Dentition(str, Enum):
+    PRIMARY = "primary"
+    PERMANENT = "permanent"
+
+
+class ToothType(str, Enum):
+    ANTERIOR = "anterior"
+    PREMOLAR = "premolar"
+    MOLAR = "molar"
+
+
+class ToothGroup(str, Enum):
+    ANTERIOR = "anterior"
+    POSTERIOR = "posterior"
+
+
+class TreatmentKind(str, Enum):
+    INITIAL = "initial"
+    RETREATMENT = "retreatment"
+
+
+def is_valid_fdi_number(tooth_number: int) -> bool:
+    """FDI validation for permanent and primary teeth.
+
+    Permanent: quadrants 1-4, tooth digit 1-8.
+    Primary: quadrants 5-8, tooth digit 1-5.
+    """
+    quadrant, tooth = divmod(tooth_number, 10)
+    if quadrant in (1, 2, 3, 4):
+        return 1 <= tooth <= 8
+    if quadrant in (5, 6, 7, 8):
+        return 1 <= tooth <= 5
+    return False
+
+
+def derive_fdi_classification(
+    tooth_number: Optional[int],
+) -> tuple[Optional[Dentition], Optional[ToothType], Optional[ToothGroup]]:
+    """Derive dentition/tooth type from a validated FDI number.
+
+    Invalid or missing FDI returns all None so downstream code selection can
+    fail safely instead of guessing.
+    """
+    if tooth_number is None or not is_valid_fdi_number(tooth_number):
+        return None, None, None
+
+    quadrant, tooth = divmod(tooth_number, 10)
+    if quadrant in (1, 2, 3, 4):
+        dentition = Dentition.PERMANENT
+        if tooth <= 3:
+            return dentition, ToothType.ANTERIOR, ToothGroup.ANTERIOR
+        if tooth <= 5:
+            return dentition, ToothType.PREMOLAR, ToothGroup.POSTERIOR
+        return dentition, ToothType.MOLAR, ToothGroup.POSTERIOR
+
+    dentition = Dentition.PRIMARY
+    if tooth <= 3:
+        return dentition, ToothType.ANTERIOR, ToothGroup.ANTERIOR
+    return dentition, ToothType.MOLAR, ToothGroup.POSTERIOR
+
+
 class ProcedureObject(BaseModel):
     procedure_family: str  # örn. "kompozit_dolgu", "kanal_tedavisi", "dis_cekimi"
     tooth_number_fdi: Optional[int] = None  # doğrulanmış FDI, yoksa None (mırıltıdan üretilmez)
+    dentition: Optional[Dentition] = None
+    tooth_type: Optional[ToothType] = None
+    tooth_group: Optional[ToothGroup] = None
     surface_count: Optional[SurfaceCount] = None
     surfaces: list[ToothSurface] = Field(default_factory=list)
     condition: Optional[DentalCondition] = None
     canal_count: Optional[CanalCount] = None
+    treatment_kind: Optional[TreatmentKind] = None
     status: ProcedureStatus = ProcedureStatus.UNCLEAR
     source_quotes: list[str] = Field(default_factory=list)
 
@@ -333,8 +398,8 @@ class CandidateCode(BaseModel):
     code: str
     procedure_name: str
     category: str
-    source: str = "TDB 2026 Rehber Tarife"
-    source_version: str = "2026"
+    source: str = "TDB Dental İşlem Kodları ve Açıklamaları"
+    source_version: str = "2023"
     report_required: bool = False
 
 
