@@ -178,16 +178,32 @@ hekimlerle yazılıp panelde kilitlenir (`authored_by` ile işaretli).
 
 ### Kod sistemi / Medula / entegrasyon (netleşen kararlar)
 
-- **V1 birincil kod sistemi KİLİTLENDİ:** TDB Dental İşlem Kodları ve
-  Açıklamaları (ODR/RES/END/PER/PRH/IMP/PRS/CRH/ORT/YGH formatı) birincil kod
-  eşleştirme kaynağıdır. TDB Rehber Tarife (2-27 formatı) yalnızca fiyat
-  referansı olarak ikincil kalabilir; kod eşleştirmenin birincil kaynağı
-  değildir. `required_documentation` hâlâ klinik uzmanlıkla doldurulacak;
-  transkriptten veya fiyat tarifesinden uydurulmayacak.
+- **Kod kaynağı KİLİTLENDİ:** V1 birincil kod sistemi TDB Dental İşlem Kodları
+  ve Açıklamaları (ODR/KDH/RES/END/PER/PRH/IMP/PRS/CRH/ORT/YGH formatı,
+  ADA/CDT türevi, 2023 — bkz. `backend/data/tdb_islem_kodlari_2023.json`).
+  TDB Rehber Tarife (2-27 formatı, 2026) artık primary kod kaynağı DEĞİL,
+  yalnızca fiyat referansı olarak ikincil kalır.
+  Kod eşleştirme anahtarları: `dentition` (`primary`/`permanent`) +
+  `tooth_type` (`anterior`/`premolar`/`molar`) + `tooth_group` +
+  `treatment_kind` (`initial`/`retreatment`), FDI'dan deterministik türetilir.
+  `canal_count` kod seçiminde KULLANILMAZ, yalnızca checklist/dokümantasyon
+  maddesi olarak taşınır (`kanal_sayisi_belirtildi_mi`).
+  Süt dişi (FDI 51-85) ayrı kodlarla (END230/240) eşleşir; premolar/molar
+  ayrımı süt dişide yoktur (yalnızca anterior/posterior).
+  `required_documentation` hâlâ klinik uzmanlıkla doldurulacak — kod verisi
+  hazır ama checklist alanları boş, hekim görüşmesi bekliyor.
+  PRS601 kaynak belgede çakışan iki kayıtla geçiyor (`source_data_conflict`
+  flag'i ile işaretlendi), TDB'den doğrulama bekliyor.
 - **Medula konumlanması.** Ürün Medula'ya DOĞRUDAN bağlanmaz (SGK
-  yetkilendirmesi + mevcut HBYS işi gerekir). Değer = Medula'ya gidecek doğru
-  SUT kodunu hekim adına hazırlamak; gönderimi klinik kendi HBYS'siyle yapar.
-  Bu, kod kaynağının SUT olmasını güçlü biçimde işaret eder.
+  yetkilendirmesi + mevcut HBYS işi gerekir). V1 kod sistemi TDB Dental İşlem
+  Kodları ve Açıklamaları'dır (§9'daki kilitli karar); bu sistem SGK/Sağlık
+  Bakanlığı kodlarıyla "ortaklaştırma" niyetiyle hazırlanmış olsa da, doğrudan
+  SUT/Medula kod eşleşmesi İÇERMEZ. Yani ürünün çıktısı (TDB kodu +
+  dokümantasyon) hastane/klinik tarafından kendi HBYS'sinde SUT'a çevrilerek
+  Medula'ya gönderilir — bu çeviri adımı ürünün kapsamı DIŞINDA, V2+'da
+  değerlendirilebilir. Segment kararı (hastane/SUT-odaklı mı, küçük
+  klinik/TDB-odaklı mı) hâlâ açık; ama V1'in teknik temeli TDB koduyla
+  ilerliyor, segment ne olursa olsun bu temel değişmez.
 - **Entegrasyon kademeleri.** V1 = copy/export (üçüncü-taraf izni
   gerektirmez, bağımsız değer). Doğrudan HSYS/Medula entegrasyonu V2+ —
   kurum + sistem sağlayıcı + olası Bakanlık iznine bağlı. Çekirdek değer
