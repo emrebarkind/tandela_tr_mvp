@@ -374,6 +374,156 @@ SCENARIOS = [
         "expected_procedures_after_role_approval": [],
         "expected_code_suggestions_after_role_approval": [],
     },
+    {
+        "name": "S5",
+        "session_id": "golden-s5",
+        "lines": [
+            ("A", "Merhaba, bugün ne şikayetiniz var?"),
+            ("B", "Sol üst tarafta yaklaşık bir haftadır ağrı var, özellikle sıcak yiyecek yiyince artıyor."),
+            ("A", "Ağzınızı açar mısınız? Sol üst yedi numarada derin çürük görüyorum, gingival kenara yakın."),
+            ("A", "Röntgende pulpaya yakın bir görüntü var, kesin olarak söylemek zor ama kanal tedavisi gerekebilir."),
+            ("B", "Yani dişimi çekmeniz gerekmeyecek değil mi?"),
+            ("A", "Hayır, şu an çekim düşünmüyoruz. Önce kanal tedavisini deneyelim, başarısız olursa değerlendiririz."),
+            ("A", "Bugün geçici dolgu yapalım, önümüzdeki hafta kanal tedavisine başlarız."),
+            ("B", "Peki sağ tarafımda da hafif bir hassasiyet var, geçen ay kompozit dolgu yaptırmıştım oradan."),
+            ("A", "Sağ üst altı numarada iki yüzlü kompozit dolgu var, aşınma yok gibi görünüyor, şimdilik bir işlem gerekmiyor, takip edelim."),
+            ("A", "Sol üst yedi numara için kanal tedavisi planlandı, bugün geçici dolgu yapıldı."),
+        ],
+        "expected": {
+            "A": {"role": "dentist", "status": "clear"},
+            "B": {"role": "patient", "status": "clear"},
+        },
+        "expected_manual_review_required": False,
+        "expect_gate_blocks": False,
+        "must_not": [],
+        "expected_facts_after_role_approval": [
+            {
+                "category": "patient_complaint",
+                "source_role": "patient",
+                "source_speaker": "B",
+                "tooth_number_fdi": None,
+                "status": None,
+                "is_uncertain": False,
+                "quote_fragments": ["Sol üst tarafta yaklaşık bir haftadır ağrı var", "sıcak yiyecek yiyince artıyor"],
+            },
+            {
+                "category": "clinical_findings",
+                "source_role": "dentist",
+                "source_speaker": "A",
+                "tooth_number_fdi": 27,
+                "status": None,
+                "is_uncertain": False,
+                "quote_fragments": ["Sol üst yedi numarada derin çürük görüyorum", "gingival kenara yakın"],
+            },
+            {
+                "category": "assessment",
+                "source_role": "dentist",
+                "source_speaker": "A",
+                "tooth_number_fdi": 27,
+                "status": None,
+                "is_uncertain": True,
+                "quote_fragments": ["kesin olarak söylemek zor", "kanal tedavisi gerekebilir"],
+            },
+            {
+                "category": "patient_complaint",
+                "source_role": "patient",
+                "source_speaker": "B",
+                "tooth_number_fdi": None,
+                "status": None,
+                "is_uncertain": False,
+                "quote_fragments": ["dişimi çekmeniz gerekmeyecek değil mi"],
+            },
+            {
+                "category": "treatment_plan",
+                "source_role": "dentist",
+                "source_speaker": "A",
+                "tooth_number_fdi": 27,
+                "status": None,
+                "is_uncertain": False,
+                "quote_fragments": ["çekim düşünmüyoruz", "kanal tedavisini deneyelim"],
+            },
+            {
+                "category": "procedures",
+                "source_role": "dentist",
+                "source_speaker": "A",
+                "tooth_number_fdi": 27,
+                "status": "planned",
+                "is_uncertain": False,
+                "quote_fragments": ["kanal tedavisi planlandı"],
+            },
+            {
+                "category": "procedures",
+                "source_role": "dentist",
+                "source_speaker": "A",
+                "tooth_number_fdi": 27,
+                "status": "performed",
+                "is_uncertain": False,
+                "quote_fragments": ["bugün geçici dolgu yapıldı"],
+            },
+            {
+                "category": "patient_complaint",
+                "source_role": "patient",
+                "source_speaker": "B",
+                "tooth_number_fdi": None,
+                "status": None,
+                "is_uncertain": False,
+                "quote_fragments": ["sağ tarafımda da hafif bir hassasiyet var"],
+            },
+            {
+                "category": "history",
+                "source_role": "patient",
+                "source_speaker": "B",
+                "tooth_number_fdi": None,
+                "status": None,
+                "is_uncertain": False,
+                "quote_fragments": ["geçen ay kompozit dolgu yaptırmıştım"],
+            },
+            {
+                "category": "clinical_findings",
+                "source_role": "dentist",
+                "source_speaker": "A",
+                "tooth_number_fdi": 16,
+                "status": None,
+                "is_uncertain": True,
+                "quote_fragments": ["Sağ üst altı numarada iki yüzlü kompozit dolgu var", "aşınma yok gibi görünüyor"],
+            },
+            {
+                "category": "treatment_plan",
+                "source_role": "dentist",
+                "source_speaker": "A",
+                "tooth_number_fdi": 16,
+                "status": None,
+                "is_uncertain": False,
+                "quote_fragments": ["şimdilik bir işlem gerekmiyor", "takip edelim"],
+            },
+        ],
+        "expected_uncertain_fragments": [],
+        "facts_must_not": [
+            "extraction_planned",
+            "s5_definite_rct",
+            "s5_right_composite_current_procedure",
+            "s5_wrong_fdi",
+        ],
+        "expected_procedures_after_role_approval": [
+            {
+                "procedure_family": "kanal_tedavisi",
+                "tooth_number_fdi": 27,
+                "status": "planned",
+                "surface_count": None,
+                "canal_count": "unclear",
+                "quote_fragments": ["kanal tedavisi planlandı"],
+            },
+            {
+                "procedure_family": "gecici_restorasyon",
+                "tooth_number_fdi": 27,
+                "status": "performed",
+                "surface_count": "unclear",
+                "canal_count": None,
+                "quote_fragments": ["bugün geçici dolgu yapıldı"],
+            },
+        ],
+        "expected_code_suggestions_after_role_approval": None,
+    },
 ]
 
 
@@ -759,9 +909,33 @@ def _fact_must_not_violations(scenario: dict, facts) -> list[str]:
             f.category in (FactCategory.PROCEDURES, FactCategory.TREATMENT_PLAN)
             and ("çek" in f.text.lower() or "çek" in f.source_quote.lower())
             and "gündemde değil" not in f.source_quote.lower()
+            and "düşünmüyoruz" not in f.source_quote.lower()
             for f in facts.facts
         ):
             violations.append("extraction_planned")
+
+    if "s5_definite_rct" in checks:
+        if any(
+            f.category in (FactCategory.CLINICAL_FINDINGS, FactCategory.ASSESSMENT)
+            and "kanal tedavisi" in f.text.lower()
+            and ("gerekebilir" in f.source_quote.lower() or "kesin olarak söylemek zor" in f.source_quote.lower())
+            and not f.is_uncertain
+            for f in facts.facts
+        ):
+            violations.append("s5_definite_rct")
+
+    if "s5_right_composite_current_procedure" in checks:
+        if any(
+            f.category == FactCategory.PROCEDURES
+            and f.tooth_number_fdi == 16
+            and ("kompozit" in f.text.lower() or "kompozit" in f.source_quote.lower())
+            for f in facts.facts
+        ):
+            violations.append("s5_right_composite_current_procedure")
+
+    if "s5_wrong_fdi" in checks:
+        if any(f.tooth_number_fdi not in (None, 16, 27) for f in facts.facts):
+            violations.append("s5_wrong_fdi")
 
     return violations
 

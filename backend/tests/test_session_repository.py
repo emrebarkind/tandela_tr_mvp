@@ -11,10 +11,11 @@ from app.models.database import create_database_engine, create_session_factory, 
 from app.models.session_records import (
     AuditLog,
     ClinicalNote,
+    CodeSuggestion,
     Session,
     Transcript,
 )
-from app.pipeline.types import ClinicalNoteDraft, DentistRole, NoteSentence
+from app.pipeline.types import CandidateCode, ClinicalNoteDraft, CodeSuggestionBundle, DentistRole, NoteSentence
 from app.repositories.session_repository import SessionRepository
 
 
@@ -104,6 +105,110 @@ class SessionRepositoryTests(unittest.TestCase):
             self.assertEqual(export_audit.metadata_json["selected_codes"], ["FIX-KANAL-2K"])
             self.assertIsNotNone(repo.get_session("persist-s1", clinic_id="clinic-1"))
             self.assertIsNone(repo.get_session("persist-s1", clinic_id="other-clinic"))
+        finally:
+            db.close()
+
+    def test_reanalysis_replaces_active_note_and_code_suggestions_but_keeps_transcripts(self) -> None:
+        db = self.session_factory()
+        try:
+            repo = SessionRepository(db)
+            first_note = ClinicalNoteDraft(
+                session_id="persist-reanalysis",
+                clinical_findings=[
+                    NoteSentence(
+                        sentence_id="s0",
+                        text="İlk taslak.",
+                        source_role=DentistRole.DENTIST,
+                        source_quote="İlk kaynak",
+                    )
+                ],
+            )
+            second_note = ClinicalNoteDraft(
+                session_id="persist-reanalysis",
+                clinical_findings=[
+                    NoteSentence(
+                        sentence_id="s0",
+                        text="Güncel taslak.",
+                        source_role=DentistRole.DENTIST,
+                        source_quote="Güncel kaynak",
+                    )
+                ],
+            )
+
+            repo.save_transcript(
+                "persist-reanalysis",
+                [{"speaker_id": "A", "text": "İlk kaynak"}],
+                source="manual_transcript",
+                clinic_id="clinic-1",
+                actor_user_id="doctor-1",
+            )
+            repo.save_clinical_note(
+                "persist-reanalysis",
+                first_note,
+                clinic_id="clinic-1",
+                actor_user_id="doctor-1",
+            )
+            repo.save_code_suggestions(
+                "persist-reanalysis",
+                [
+                    CodeSuggestionBundle(
+                        session_id="persist-reanalysis",
+                        candidates=[
+                            CandidateCode(
+                                code="FIX-OLD",
+                                procedure_name="Eski Kod",
+                                category="Test",
+                            )
+                        ],
+                    )
+                ],
+                clinic_id="clinic-1",
+            )
+            repo.save_transcript(
+                "persist-reanalysis",
+                [{"speaker_id": "A", "text": "Güncel kaynak"}],
+                source="manual_transcript",
+                clinic_id="clinic-1",
+                actor_user_id="doctor-1",
+            )
+            repo.save_clinical_note(
+                "persist-reanalysis",
+                second_note,
+                clinic_id="clinic-1",
+                actor_user_id="doctor-1",
+            )
+            repo.save_code_suggestions(
+                "persist-reanalysis",
+                [
+                    CodeSuggestionBundle(
+                        session_id="persist-reanalysis",
+                        candidates=[
+                            CandidateCode(
+                                code="FIX-NEW",
+                                procedure_name="Güncel Kod",
+                                category="Test",
+                            )
+                        ],
+                    )
+                ],
+                clinic_id="clinic-1",
+            )
+            db.commit()
+
+            notes = list(db.scalars(select(ClinicalNote).where(ClinicalNote.session_id == "persist-reanalysis")))
+            transcripts = list(db.scalars(select(Transcript).where(Transcript.session_id == "persist-reanalysis")))
+            suggestions = list(db.scalars(select(CodeSuggestion).where(CodeSuggestion.session_id == "persist-reanalysis")))
+            audit_actions = [
+                row.action
+                for row in db.scalars(select(AuditLog).where(AuditLog.session_id == "persist-reanalysis"))
+            ]
+
+            self.assertEqual(len(notes), 1)
+            self.assertEqual(notes[0].draft_json["clinical_findings"][0]["text"], "Güncel taslak.")
+            self.assertEqual(len(transcripts), 2)
+            self.assertEqual(len(suggestions), 1)
+            self.assertEqual(suggestions[0].procedure_code.code, "FIX-NEW")
+            self.assertIn("draft_replaced", audit_actions)
         finally:
             db.close()
 

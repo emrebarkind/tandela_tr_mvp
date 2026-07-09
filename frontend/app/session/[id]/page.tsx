@@ -1,0 +1,612 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { ApprovedExport } from "@/components/review/ApprovedExport";
+import { CodeSuggestionsPanel } from "@/components/review/CodeSuggestionsPanel";
+import { DentalChartPanel } from "@/components/review/DentalChartPanel";
+import { NoteDocument } from "@/components/review/NoteDocument";
+import { RoleGate } from "@/components/review/RoleGate";
+import { TranscriptDrawer } from "@/components/review/TranscriptDrawer";
+import { TranscriptInput } from "@/components/review/TranscriptInput";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+
+type Role = "dentist" | "patient" | "assistant_or_other" | "unknown";
+type SpeakerStatus = "clear" | "review_needed" | "unresolved";
+type ChecklistState = "found" | "review" | "missing";
+type ToothSurface = "O" | "M" | "D" | "V" | "L";
+type DentalChartCondition =
+  | "caries"
+  | "composite"
+  | "amalgam"
+  | "inlay"
+  | "onlay"
+  | "crown"
+  | "bridge"
+  | "prosthesis"
+  | "implant"
+  | "rct"
+  | "missing"
+  | "unclear";
+
+type TranscriptUtterance = {
+  speaker_id: string;
+  text: string;
+};
+
+type TranscriptDiagnostics = {
+  invalidLines: number[];
+  speakerCount: number;
+  utteranceCount: number;
+};
+
+type Speaker = {
+  id: string;
+  role: Role;
+  status: SpeakerStatus;
+  utterances: number;
+  sample: string;
+  reason?: string;
+};
+
+type NoteSentence = {
+  sentence_id?: string;
+  text: string;
+  source_quote: string;
+  source_role: Role;
+};
+
+type ClinicalNote = {
+  patient_complaint: NoteSentence[];
+  history: NoteSentence[];
+  clinical_findings: NoteSentence[];
+  assessment: NoteSentence[];
+  treatment_plan: NoteSentence[];
+  procedures_note: NoteSentence[];
+  uncertain_items: string[];
+  is_draft?: boolean;
+};
+
+type CandidateCode = {
+  code: string;
+  procedure_name: string;
+  category: string;
+};
+
+type ChecklistItem = {
+  item_id: string;
+  label: string;
+  status: ChecklistState;
+  evidence_quote?: string | null;
+};
+
+type CodeMatchResult = {
+  code: string;
+  checklist: ChecklistItem[];
+  match_state: string;
+};
+
+type ProcedureObject = {
+  procedure_family: string;
+  tooth_number_fdi?: number | null;
+  surface_count?: string | null;
+  surfaces?: ToothSurface[] | null;
+  surface?: ToothSurface | ToothSurface[] | null;
+  condition?: DentalChartCondition | string | null;
+  canal_count?: string | null;
+  status: string;
+  source_quotes: string[];
+};
+
+type ProcedureReview = {
+  procedure: ProcedureObject;
+  review_state: string;
+  candidates: CandidateCode[];
+  match_results: CodeMatchResult[];
+  ambiguity_note?: string | null;
+  dentist_must_choose: boolean;
+};
+
+type PipelineReviewResponse = {
+  session_id: string;
+  status: string;
+  review_state: string;
+  stopped_at_stage?: string | null;
+  next_action: string;
+  role_review?: {
+    speakers: {
+      speaker_id: string;
+      role: Role;
+      status: SpeakerStatus;
+      review_state: SpeakerStatus;
+      utterance_count: number;
+      reason?: string | null;
+    }[];
+    manual_review_required: boolean;
+  } | null;
+  dentist_review?: {
+    note: ClinicalNote;
+    procedures: ProcedureReview[];
+    uncertain_items: string[];
+  } | null;
+  export_payload?: ExportPayload | null;
+};
+
+type ExportPayload = {
+  session_id: string;
+  clinical_note_text: string;
+  selected_codes: string[];
+  audit: {
+    action: string;
+    reviewer_user_id?: string | null;
+    approved: boolean;
+    created_at_utc: string;
+    source: string;
+  };
+  warning: string;
+};
+
+type NoteSectionId = "patient_complaint" | "history" | "clinical_findings" | "assessment" | "treatment_plan" | "procedures_note";
+
+type NoteSection = {
+  id: NoteSectionId;
+  title: string;
+  lines: NoteSectionLine[];
+};
+
+type NoteSectionLine = {
+  text: string;
+  source_quote?: string;
+  source_role?: Role;
+};
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+const AUTH_HEADERS = {
+  "X-Tandela-Clinic-Id": process.env.NEXT_PUBLIC_TANDELA_CLINIC_ID ?? "dev-clinic",
+  "X-Tandela-User-Id": process.env.NEXT_PUBLIC_TANDELA_USER_ID ?? "frontend-doctor",
+  "X-Tandela-User-Role": process.env.NEXT_PUBLIC_TANDELA_USER_ROLE ?? "dentist",
+};
+
+const sampleTranscript = `A: Merhaba, şikayetiniz nedir?
+B: Sağ alt tarafta iki gündür ağrım var, özellikle yemek yerken zonkluyor.
+A: Ağzınızı açın lütfen. Sağ alt altıda, yani 46 numarada derin çürük görüyorum.
+C: Hocam röntgeni açıyorum.
+A: Perküsyonda hassasiyet var. Kanal tedavisi gerekebilir. Bugün geçici dolgu yapıp kanal tedavisi planlayalım.
+B: Benim dişim iltihaplı mı yani?
+A: Röntgene göre periapikal bölgede şüpheli bir görüntü var, kesin değerlendirme için endodontik muayeneyle ilerleyeceğiz.
+A: 46 numara için kanal tedavisi planlandı, geçici restorasyon yapılacak.`;
+
+const transcriptLinePattern = /^([A-Za-zÇĞİÖŞÜçğıöşü0-9_-]+)\s*:\s*(.+)$/;
+
+export default function ReviewPage({ params }: { params: { id: string } }) {
+  const [sessionId] = useState(params.id);
+  const [patientName] = useState("Demo Danışan");
+  const [encounterAt] = useState(() => toDatetimeLocalValue(new Date()));
+  const [transcriptText, setTranscriptText] = useState(sampleTranscript);
+  const [speakers, setSpeakers] = useState<Speaker[]>([]);
+  const [selectedCode, setSelectedCode] = useState("FIX-KANAL-2K");
+  const [approved, setApproved] = useState(false);
+  const [response, setResponse] = useState<PipelineReviewResponse | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [exportPayload, setExportPayload] = useState<ExportPayload | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const [editableNote, setEditableNote] = useState<ClinicalNote | null>(null);
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState("transcript");
+
+  const utterances = useMemo(() => parseTranscript(transcriptText), [transcriptText]);
+  const transcriptDiagnostics = useMemo(() => inspectTranscript(transcriptText), [transcriptText]);
+  const canAnalyzeTranscript = transcriptDiagnostics.utteranceCount > 0 && transcriptDiagnostics.invalidLines.length === 0;
+
+  const dentistReview = response?.dentist_review ?? null;
+  const displayedNote = editableNote ?? dentistReview?.note ?? null;
+  const procedures = dentistReview?.procedures ?? [];
+  const noteSections = displayedNote ? noteSectionsFromBackend(displayedNote) : [];
+  const needsRoleReview = response?.next_action === "review_speaker_roles";
+  const hasAnalysisDraft = response?.next_action === "review_note_and_codes" && Boolean(displayedNote);
+
+  async function runTranscriptAnalysis(sourceUtterances: TranscriptUtterance[]) {
+    return postReviewResponse("/sessions", {
+      session_id: sessionId,
+      utterances: sourceUtterances,
+    });
+  }
+
+  async function analyzeTranscript() {
+    if (!canAnalyzeTranscript) {
+      setError("Transkriptte analiz edilemeyen satır var. Her satır A: metin formatında olmalı.");
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    setApproved(false);
+    setExportPayload(null);
+    setEditableNote(null);
+    setExportMessage(null);
+    try {
+      const result = await runTranscriptAnalysis(utterances);
+      applyBackendResponse(result, utterances);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function approveRolesAndResume() {
+    if (!needsRoleReview) {
+      setError("Devam etmek için önce rol onayı gerektiren bir analiz sonucu olmalı.");
+      return;
+    }
+    if (!canAnalyzeTranscript) {
+      setError("Rol onayı öncesi transkript satırlarını düzeltin.");
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    setApproved(false);
+    setExportPayload(null);
+    try {
+      const activeSessionId = response?.session_id ?? sessionId;
+      const result = await postReviewResponse(`/sessions/${encodeURIComponent(activeSessionId)}/resume-role-review`, {
+        utterances,
+        corrected_roles: speakers.map((speaker) => ({
+          speaker_id: speaker.id,
+          role: speaker.role,
+          status: "clear",
+          reason: "Frontend review: hekim rolü onayladı.",
+        })),
+      });
+      setSpeakers((current) =>
+        current.map((speaker) => ({
+          ...speaker,
+          status: "clear",
+          reason: speaker.reason ?? "Frontend review: hekim rolü onayladı.",
+        })),
+      );
+      applyBackendResponse(result);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function approveClinicalReview() {
+    if (!hasAnalysisDraft || !displayedNote) {
+      setError("Onay için önce klinik not ve kod taslağı oluşturulmalı.");
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      const activeSessionId = response?.session_id ?? sessionId;
+      const result = await postReviewResponse(`/sessions/${encodeURIComponent(activeSessionId)}/approve`, {
+        selected_codes: selectedCode ? [selectedCode] : [],
+        reviewer_user_id: "frontend-doctor",
+        approved: true,
+        approved_note: displayedNote,
+      });
+      setApproved(true);
+      setExportPayload(result.export_payload ?? null);
+      setExportMessage("Hekim onayı kaydedildi; çıktı kopyalama ve indirme için hazır.");
+      setResponse((current) => ({
+        ...(current ?? result),
+        status: result.status,
+        next_action: result.next_action,
+        stopped_at_stage: result.stopped_at_stage,
+        export_payload: result.export_payload,
+      }));
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  function applyBackendResponse(result: PipelineReviewResponse, sourceUtterances: TranscriptUtterance[] = utterances) {
+    setResponse(result);
+    setEditableNote(result.dentist_review?.note ?? null);
+    setExportMessage(null);
+    if (result.role_review) {
+      setSpeakers(
+        result.role_review.speakers.map((speaker) => ({
+          id: speaker.speaker_id,
+          role: speaker.role,
+          status: speaker.status,
+          utterances: speaker.utterance_count,
+          sample: sampleForSpeaker(speaker.speaker_id, sourceUtterances),
+          reason: speaker.reason ?? undefined,
+        })),
+      );
+    }
+    const firstCode = result.dentist_review?.procedures[0]?.candidates[0]?.code;
+    if (firstCode) setSelectedCode(firstCode);
+  }
+
+  function updateSpeakerRole(id: string, role: Role) {
+    setSpeakers((current) =>
+      current.map((speaker) => (speaker.id === id ? { ...speaker, role, status: "clear" } : speaker)),
+    );
+  }
+
+  function updateNoteSentence(sectionId: NoteSectionId, lineIndex: number, text: string) {
+    setEditableNote((current) => {
+      if (!current) return current;
+      const section = current[sectionId];
+      return {
+        ...current,
+        [sectionId]: section.map((sentence, index) => (index === lineIndex ? { ...sentence, text } : sentence)),
+      };
+    });
+  }
+
+  async function copyExportToClipboard() {
+    if (!exportPayload) return;
+    const text = formatExportPayload(exportPayload);
+    await navigator.clipboard.writeText(text);
+    setExportMessage("Export metni panoya kopyalandı.");
+  }
+
+  function downloadExportTxt() {
+    if (!exportPayload) return;
+    const blob = new Blob([formatExportPayload(exportPayload)], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${exportPayload.session_id}-tandela-export.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setExportMessage("TXT dosyası indirildi.");
+  }
+
+  const hasDentalChart = procedures.some((procedure) => procedure.procedure.tooth_number_fdi);
+  const hasCodeSuggestions = procedures.some((procedure) => procedure.candidates.length);
+  const defaultTab = hasAnalysisDraft && displayedNote ? "note" : hasDentalChart ? "chart" : hasCodeSuggestions ? "codes" : "transcript";
+  useEffect(() => {
+    setActiveWorkspaceTab(defaultTab);
+  }, [defaultTab]);
+
+  if (approved && exportPayload) {
+    return (
+      <ApprovedExport
+        message={exportMessage}
+        onCopy={() => void copyExportToClipboard()}
+        onDownloadTxt={downloadExportTxt}
+      />
+    );
+  }
+
+  if (needsRoleReview) {
+    return (
+      <RoleGate
+        speakers={speakers}
+        isLoading={isLoading}
+        canApprove={canAnalyzeTranscript}
+        onRoleChange={updateSpeakerRole}
+        onApprove={() => void approveRolesAndResume()}
+      />
+    );
+  }
+
+  if (hasAnalysisDraft && displayedNote) {
+    return (
+      <main className="bg-background p-4 md:p-6">
+        <div className="mx-auto max-w-7xl space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border bg-card p-4">
+            <div>
+              <p className="text-sm font-medium text-muted-foreground">{patientName.trim() || "İsimsiz danışan"}</p>
+              <h2 className="mt-1 text-xl font-semibold tracking-tight">{formatEncounterDate(encounterAt)}</h2>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <Badge className="rounded-lg bg-amber-100 px-3 py-1.5 text-sm font-semibold text-amber-900 hover:bg-amber-100">
+                Taslak · Hekim onayı gereklidir
+              </Badge>
+              <Button type="button" onClick={() => void approveClinicalReview()} disabled={isLoading || !hasAnalysisDraft}>
+                İncele ve Onayla
+              </Button>
+            </div>
+          </div>
+
+          <Tabs value={activeWorkspaceTab} onValueChange={setActiveWorkspaceTab} className="gap-4">
+            <TabsList className="w-full justify-start overflow-x-auto">
+              <TabsTrigger value="note">Klinik Not</TabsTrigger>
+              {hasDentalChart ? <TabsTrigger value="chart">Diş Şeması</TabsTrigger> : null}
+              {hasCodeSuggestions ? <TabsTrigger value="codes">Kod Önerileri</TabsTrigger> : null}
+              {transcriptText.trim() ? <TabsTrigger value="transcript">Transkript</TabsTrigger> : null}
+            </TabsList>
+
+            <TabsContent value="note">
+              <NoteDocument
+                sections={noteSections}
+                uncertainItems={dentistReview?.uncertain_items ?? []}
+                onSentenceChange={updateNoteSentence}
+              />
+            </TabsContent>
+            {hasDentalChart ? (
+              <TabsContent value="chart">
+                <DentalChartPanel procedures={procedures.map((procedure) => procedure.procedure)} approved={approved} />
+              </TabsContent>
+            ) : null}
+            {hasCodeSuggestions ? (
+              <TabsContent value="codes">
+                <CodeSuggestionsPanel
+                  procedures={procedures}
+                  selectedCode={selectedCode}
+                  onSelectedCodeChange={setSelectedCode}
+                />
+              </TabsContent>
+            ) : null}
+            {transcriptText.trim() ? (
+              <TabsContent value="transcript">
+                <TranscriptTab transcriptText={transcriptText} onTranscriptChange={setTranscriptText} />
+              </TabsContent>
+            ) : null}
+          </Tabs>
+
+            {error ? (
+            <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
+                {error}
+              </p>
+            ) : null}
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="bg-background p-4 md:p-6">
+      <div className="mx-auto max-w-5xl">
+        <Tabs defaultValue="transcript" className="gap-4">
+          <TabsList>
+            <TabsTrigger value="transcript">Transkript</TabsTrigger>
+          </TabsList>
+          <TabsContent value="transcript">
+            <Card>
+              <CardHeader>
+                <CardTitle>Transkript</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <TranscriptTab transcriptText={transcriptText} onTranscriptChange={setTranscriptText} />
+                <Button type="button" onClick={() => void analyzeTranscript()} disabled={isLoading || !canAnalyzeTranscript}>
+                  Analiz Et
+                </Button>
+                {error ? <p className="text-sm font-medium text-destructive">{error}</p> : null}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
+      </div>
+    </main>
+  );
+}
+
+async function postReviewResponse(path: string, body: unknown): Promise<PipelineReviewResponse> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return response.json() as Promise<PipelineReviewResponse>;
+}
+
+function parseTranscript(text: string): TranscriptUtterance[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = transcriptLinePattern.exec(line);
+      if (!match) return null;
+      return { speaker_id: match[1], text: match[2] };
+    })
+    .filter((utterance): utterance is TranscriptUtterance => utterance !== null);
+}
+
+function inspectTranscript(text: string): TranscriptDiagnostics {
+  const invalidLines: number[] = [];
+  const speakers = new Set<string>();
+  let utteranceCount = 0;
+  text.split("\n").forEach((rawLine, index) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    const match = transcriptLinePattern.exec(line);
+    if (!match) {
+      invalidLines.push(index + 1);
+      return;
+    }
+    speakers.add(match[1]);
+    utteranceCount += 1;
+  });
+  return {
+    invalidLines,
+    speakerCount: speakers.size,
+    utteranceCount,
+  };
+}
+
+function TranscriptTab({
+  transcriptText,
+  onTranscriptChange,
+}: {
+  transcriptText: string;
+  onTranscriptChange: (value: string) => void;
+}) {
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <Textarea
+          className="min-h-[520px] resize-y bg-background text-sm leading-6"
+          value={transcriptText}
+          onChange={(event) => onTranscriptChange(event.target.value)}
+          aria-label="Transkript"
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+function formatExportPayload(payload: ExportPayload) {
+  const codes = payload.selected_codes.length ? payload.selected_codes.join(", ") : "Kod seçilmedi";
+  return [
+    `Session: ${payload.session_id}`,
+    `Onaylayan: ${payload.audit.reviewer_user_id ?? "Bilinmiyor"}`,
+    `Onay zamanı: ${payload.audit.created_at_utc}`,
+    `Seçilen kodlar: ${codes}`,
+    "",
+    payload.clinical_note_text || "Klinik not metni yok.",
+  ].join("\n");
+}
+
+function noteSectionsFromBackend(note: ClinicalNote): NoteSection[] {
+  return [
+    { id: "patient_complaint", title: "Hasta şikayeti", lines: note.patient_complaint.map(noteLineFromSentence) },
+    { id: "history", title: "Geçmiş", lines: note.history.map(noteLineFromSentence) },
+    { id: "clinical_findings", title: "Klinik bulgular", lines: note.clinical_findings.map(noteLineFromSentence) },
+    { id: "assessment", title: "Değerlendirme", lines: note.assessment.map(noteLineFromSentence) },
+    { id: "treatment_plan", title: "Tedavi planı", lines: note.treatment_plan.map(noteLineFromSentence) },
+    { id: "procedures_note", title: "İşlem notu", lines: note.procedures_note.map(noteLineFromSentence) },
+  ];
+}
+
+function noteLineFromSentence(sentence: NoteSentence): NoteSectionLine {
+  return {
+    text: sentence.text,
+    source_quote: sentence.source_quote,
+    source_role: sentence.source_role,
+  };
+}
+
+function sampleForSpeaker(speakerId: string, utterances: TranscriptUtterance[]) {
+  return utterances.find((utterance) => utterance.speaker_id === speakerId)?.text ?? "Örnek ifade yok.";
+}
+
+function errorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  return "Backend bağlantısı başarısız.";
+}
+
+function toDatetimeLocalValue(date: Date) {
+  const offsetMs = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function formatEncounterDate(value: string) {
+  if (!value) return "Tarih yok";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat("tr-TR", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(parsed);
+}

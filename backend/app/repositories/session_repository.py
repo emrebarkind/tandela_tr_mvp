@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from app.models.session_records import (
@@ -208,21 +208,51 @@ class SessionRepository:
             dentist_id=actor_user_id,
         )
         note_json = note.model_dump(mode="json")
-        record = ClinicalNote(
-            session_id=session_id,
-            draft_json=note_json,
-            approved_json=note_json if status == "approved" else None,
-            status=status,
-            model_version=model_version,
+        record = self.db.scalar(
+            select(ClinicalNote)
+            .where(ClinicalNote.session_id == session_id)
+            .order_by(ClinicalNote.id.asc())
         )
-        self.db.add(record)
+        if record is None:
+            record = ClinicalNote(
+                session_id=session_id,
+                draft_json=note_json,
+                approved_json=note_json if status == "approved" else None,
+                status=status,
+                model_version=model_version,
+            )
+            self.db.add(record)
+            self.db.flush()
+            audit_action = "clinical_note_saved" if status == "draft" else "clinical_note_approved"
+        else:
+            previous_draft_json = record.draft_json
+            previous_status = record.status
+            self.add_audit_log(
+                user_id=actor_user_id,
+                session_id=session_id,
+                clinic_id=clinic_id,
+                action="draft_replaced",
+                entity_type="clinical_note",
+                entity_id=str(record.id),
+                source="ai" if status == "draft" else "manual",
+                metadata_json={
+                    "previous_status": previous_status,
+                    "new_status": status,
+                    "previous_draft_json": previous_draft_json,
+                },
+            )
+            record.draft_json = note_json
+            record.approved_json = note_json if status == "approved" else None
+            record.status = status
+            record.model_version = model_version
+            audit_action = "clinical_note_saved" if status == "draft" else "clinical_note_approved"
         self.add_audit_log(
             user_id=actor_user_id,
             session_id=session_id,
             clinic_id=clinic_id,
-            action="clinical_note_saved" if status == "draft" else "clinical_note_approved",
+            action=audit_action,
             entity_type="clinical_note",
-            entity_id=None,
+            entity_id=str(record.id) if record.id is not None else None,
             source="ai" if status == "draft" else "manual",
             metadata_json={"status": status},
         )
@@ -237,6 +267,9 @@ class SessionRepository:
         clinic_id: str,
     ) -> list[CodeSuggestion]:
         self._require_session_in_clinic(session_id, clinic_id)
+        for existing in self.db.scalars(select(CodeSuggestion).where(CodeSuggestion.session_id == session_id)):
+            self.db.delete(existing)
+        self.db.flush()
         records: list[CodeSuggestion] = []
         for bundle in bundles:
             explanations_by_code = {explanation.code: explanation for explanation in bundle.explanations}
@@ -361,6 +394,15 @@ class SessionRepository:
                 }
                 for note in record.clinical_notes
             ],
+            "transcripts": [
+                {
+                    "id": transcript.id,
+                    "source": transcript.source,
+                    "utterances_json": transcript.utterances_json,
+                    "created_at": transcript.created_at.isoformat(),
+                }
+                for transcript in record.transcripts
+            ],
             "code_suggestions": [
                 {
                     "id": suggestion.id,
@@ -386,8 +428,64 @@ class SessionRepository:
             ],
         }
 
+    def list_patients(self, *, clinic_id: str, query: Optional[str] = None) -> list[dict]:
+        stmt = select(Patient).where(Patient.clinic_id == clinic_id)
+        if query:
+            like = f"%{query.strip()}%"
+            stmt = stmt.where(or_(Patient.initials.ilike(like), Patient.external_id.ilike(like)))
+        patients = list(self.db.scalars(stmt))
+        return [self._patient_summary(patient) for patient in patients]
+
+    def get_patient_sessions(self, patient_id: str, *, clinic_id: str) -> Optional[dict]:
+        patient = self.db.scalar(
+            select(Patient).where(Patient.id == patient_id, Patient.clinic_id == clinic_id)
+        )
+        if patient is None:
+            return None
+        sessions = sorted(patient.sessions, key=lambda record: record.started_at, reverse=True)
+        return {
+            "id": patient.id,
+            "initials": patient.initials,
+            "external_id": patient.external_id,
+            "created_at": patient.created_at.isoformat(),
+            "sessions": [self._session_summary(session) for session in sessions],
+        }
+
     def find_user_by_email(self, email: str) -> Optional[User]:
         return self.db.scalar(select(User).where(User.email == email))
+
+    def _patient_summary(self, patient: Patient) -> dict:
+        sessions = sorted(patient.sessions, key=lambda record: record.started_at, reverse=True)
+        latest = sessions[0] if sessions else None
+        return {
+            "id": patient.id,
+            "initials": patient.initials,
+            "external_id": patient.external_id,
+            "created_at": patient.created_at.isoformat(),
+            "last_session_at": latest.started_at.isoformat() if latest is not None else None,
+            "session_count": len(sessions),
+            "last_procedures": self._procedure_labels(latest) if latest is not None else [],
+            "status": latest.status if latest is not None else "no_sessions",
+        }
+
+    def _session_summary(self, session: Session) -> dict:
+        return {
+            "id": session.id,
+            "status": session.status,
+            "started_at": session.started_at.isoformat() if session.started_at else None,
+            "completed_at": session.completed_at.isoformat() if session.completed_at else None,
+            "procedures": self._procedure_labels(session),
+        }
+
+    def _procedure_labels(self, session: Session) -> list[str]:
+        labels: list[str] = []
+        for suggestion in session.code_suggestions:
+            if suggestion.procedure_code is None:
+                continue
+            label = suggestion.procedure_code.title or suggestion.procedure_code.category
+            if label and label not in labels:
+                labels.append(label)
+        return labels
 
     def _upsert_procedure_code(
         self,

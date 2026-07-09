@@ -277,18 +277,103 @@ A: Şimdilik retreatment planlıyoruz, çekim gündemde değil.
 
 ---
 
+# Senaryo 5 — İki diş, çekim negasyonu, mevcut kompozit ve geçici dolgu
+
+**Kapsadığı kurallar:** §4.2 (hasta lafı klinik bulgu olamaz), §4.3
+(epistemik kip), §4.9 (FDI normalizasyon), çekim negasyonu, mevcut/geçmiş
+kompozitin bu seans işlemi sayılmaması.
+
+### Transkript
+```
+A: Merhaba, bugün ne şikayetiniz var?
+B: Sol üst tarafta yaklaşık bir haftadır ağrı var, özellikle sıcak yiyecek yiyince artıyor.
+A: Ağzınızı açar mısınız? Sol üst yedi numarada derin çürük görüyorum, gingival kenara yakın.
+A: Röntgende pulpaya yakın bir görüntü var, kesin olarak söylemek zor ama kanal tedavisi gerekebilir.
+B: Yani dişimi çekmeniz gerekmeyecek değil mi?
+A: Hayır, şu an çekim düşünmüyoruz. Önce kanal tedavisini deneyelim, başarısız olursa değerlendiririz.
+A: Bugün geçici dolgu yapalım, önümüzdeki hafta kanal tedavisine başlarız.
+B: Peki sağ tarafımda da hafif bir hassasiyet var, geçen ay kompozit dolgu yaptırmıştım oradan.
+A: Sağ üst altı numarada iki yüzlü kompozit dolgu var, aşınma yok gibi görünüyor, şimdilik bir işlem gerekmiyor, takip edelim.
+A: Sol üst yedi numara için kanal tedavisi planlandı, bugün geçici dolgu yapıldı.
+```
+
+### Beklenen role_assignment
+```json
+{
+  "assignments": [
+    {"speaker_id": "A", "role": "dentist", "status": "clear", "utterance_count": 7},
+    {"speaker_id": "B", "role": "patient", "status": "clear", "utterance_count": 3}
+  ],
+  "manual_review_required": false
+}
+```
+
+### Beklenen facts
+```json
+{
+  "facts": [
+    {"category": "patient_complaint", "source_role": "patient", "source_speaker": "B",
+     "tooth_number_fdi": null, "is_uncertain": false,
+     "source_quote": "Sol üst tarafta yaklaşık bir haftadır ağrı var, özellikle sıcak yiyecek yiyince artıyor"},
+    {"category": "clinical_findings", "source_role": "dentist", "source_speaker": "A",
+     "tooth_number_fdi": 27, "is_uncertain": false,
+     "source_quote": "Sol üst yedi numarada derin çürük görüyorum, gingival kenara yakın"},
+    {"category": "assessment", "source_role": "dentist", "source_speaker": "A",
+     "tooth_number_fdi": 27, "is_uncertain": true,
+     "source_quote": "kesin olarak söylemek zor ama kanal tedavisi gerekebilir"},
+    {"category": "patient_complaint", "source_role": "patient", "source_speaker": "B",
+     "tooth_number_fdi": null, "is_uncertain": false,
+     "source_quote": "Yani dişimi çekmeniz gerekmeyecek değil mi?"},
+    {"category": "treatment_plan", "source_role": "dentist", "source_speaker": "A",
+     "tooth_number_fdi": 27, "is_uncertain": false,
+     "source_quote": "Hayır, şu an çekim düşünmüyoruz. Önce kanal tedavisini deneyelim"},
+    {"category": "procedures", "source_role": "dentist", "source_speaker": "A",
+     "tooth_number_fdi": 27, "status": "planned", "is_uncertain": false,
+     "source_quote": "kanal tedavisi planlandı"},
+    {"category": "procedures", "source_role": "dentist", "source_speaker": "A",
+     "tooth_number_fdi": 27, "status": "performed", "is_uncertain": false,
+     "source_quote": "bugün geçici dolgu yapıldı"},
+    {"category": "patient_complaint", "source_role": "patient", "source_speaker": "B",
+     "tooth_number_fdi": null, "is_uncertain": false,
+     "source_quote": "sağ tarafımda da hafif bir hassasiyet var"},
+    {"category": "history", "source_role": "patient", "source_speaker": "B",
+     "tooth_number_fdi": null, "is_uncertain": false,
+     "source_quote": "geçen ay kompozit dolgu yaptırmıştım"},
+    {"category": "clinical_findings", "source_role": "dentist", "source_speaker": "A",
+     "tooth_number_fdi": 16, "is_uncertain": true,
+     "source_quote": "Sağ üst altı numarada iki yüzlü kompozit dolgu var, aşınma yok gibi görünüyor"},
+    {"category": "treatment_plan", "source_role": "dentist", "source_speaker": "A",
+     "tooth_number_fdi": 16, "is_uncertain": false,
+     "source_quote": "şimdilik bir işlem gerekmiyor, takip edelim"}
+  ],
+  "uncertain_items": []
+}
+```
+
+### MUST NOT
+- ❌ Hastanın "dişimi çekmeniz gerekmeyecek değil mi?" sorusunun çekim planı
+  ya da işlem önerisi olması (§4.2).
+- ❌ Hekimin "çekim düşünmüyoruz" ifadesinden çekim prosedürü üretmek.
+- ❌ "kanal tedavisi gerekebilir" ifadesini kesin endodontik tanıya çevirmek
+  (§4.3).
+- ❌ Sağ üst altıdaki mevcut/önceden yapılmış kompozit dolguyu bu seans
+  `performed` işlem olarak saymak.
+- ❌ "Sol üst yedi" için 27, "sağ üst altı" için 16 dışında FDI üretmek.
+
+---
+
 ## Setin kapsadığı kural matrisi
 
-| Kural | S1 | S2 | S3 | S4 |
-|---|---|---|---|---|
-| §4.1 belirsizse dur | | | ✓ | ✓ |
-| §4.2 hasta lafı / procedures→history | ✓ | | ✓ | ✓ |
-| §4.3 epistemik kip | ✓ | ✓ | | |
-| §4.4 çelişik status → unclear | ✓ | ✓ | | |
-| §4.8 tek-ifade `clear` olamaz / 2-3 konuşmacı | ✓ | ✓ | ✓ | ✓ |
-| §4.9 FDI normalize / mırıltıdan üretme | ✓ | ✓ | | ✓ |
-| REVIEW GATE bloke | ✓ | | ✓ | ✓ |
-| Checklist eksik-yüzey | | ✓ | | |
+| Kural | S1 | S2 | S3 | S4 | S5 |
+|---|---|---|---|---|---|
+| §4.1 belirsizse dur | | | ✓ | ✓ | |
+| §4.2 hasta lafı / procedures→history | ✓ | | ✓ | ✓ | ✓ |
+| §4.3 epistemik kip | ✓ | ✓ | | | ✓ |
+| §4.4 çelişik status → unclear | ✓ | ✓ | | | |
+| §4.8 tek-ifade `clear` olamaz / 2-3 konuşmacı | ✓ | ✓ | ✓ | ✓ | |
+| §4.9 FDI normalize / mırıltıdan üretme | ✓ | ✓ | | ✓ | ✓ |
+| REVIEW GATE bloke | ✓ | | ✓ | ✓ | |
+| Checklist eksik-yüzey | | ✓ | | | |
 
 > Eksik kalan: §4.5 (kod uydurma), §4.6 (eksik dok. önerisi yalnız transkriptten),
 > §4.7 (sayısal confidence yok) — bunlar code-matching aşamasının testleri;

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -32,6 +34,7 @@ from app.api.session_pipeline import (
     to_review_response,
 )
 from app.db import create_database_engine, create_session_factory, init_database
+from app.prompts.loader import load_system_prompt
 from app.providers.llm import LLMProvider
 from app.providers.audio_processing import (
     AudioProcessingProvider,
@@ -41,8 +44,10 @@ from app.providers.audio_processing import (
 from app.repositories.session_repository import SessionRepository
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+patients_router = APIRouter(prefix="/patients", tags=["patients"])
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 health_router = APIRouter(tags=["health"])
+chat_router = APIRouter(prefix="/chat", tags=["chat"])
 _ENGINE = create_database_engine()
 _SESSION_FACTORY = create_session_factory(_ENGINE)
 _DATABASE_INITIALIZED = False
@@ -98,6 +103,44 @@ class LoginResponse(BaseModel):
     role: str
 
 
+class PatientSummaryResponse(BaseModel):
+    id: str
+    initials: Optional[str] = None
+    external_id: Optional[str] = None
+    created_at: str
+    last_session_at: Optional[str] = None
+    session_count: int
+    last_procedures: list[str]
+    status: str
+
+
+class PatientSessionSummaryResponse(BaseModel):
+    id: str
+    status: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    procedures: list[str]
+
+
+class PatientSessionsResponse(BaseModel):
+    id: str
+    initials: Optional[str] = None
+    external_id: Optional[str] = None
+    created_at: str
+    sessions: list[PatientSessionSummaryResponse]
+
+
+class ChatRequest(BaseModel):
+    message: str
+    patient_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    source: str = "registered_clinical_records"
+
+
 @auth_router.post("/login", response_model=LoginResponse)
 def login_endpoint(
     request: LoginRequest,
@@ -113,6 +156,60 @@ def login_endpoint(
         user_id=user.id,
         role=user.role,
     )
+
+
+@patients_router.get("", response_model=list[PatientSummaryResponse])
+def list_patients_endpoint(
+    q: Optional[str] = None,
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> list[PatientSummaryResponse]:
+    return [
+        PatientSummaryResponse(**patient)
+        for patient in repository.list_patients(clinic_id=auth.clinic_id, query=q)
+    ]
+
+
+@patients_router.get("/{patient_id}/sessions", response_model=PatientSessionsResponse)
+def get_patient_sessions_endpoint(
+    patient_id: str,
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> PatientSessionsResponse:
+    patient = repository.get_patient_sessions(patient_id, clinic_id=auth.clinic_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Hasta bulunamadı.")
+    return PatientSessionsResponse(**patient)
+
+
+@chat_router.post("", response_model=ChatResponse)
+def chat_endpoint(
+    request: ChatRequest,
+    llm_provider: LLMProvider = Depends(get_llm_provider),
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> ChatResponse:
+    context = _registered_record_context(request, repository, clinic_id=auth.clinic_id)
+    if not context.strip() or not request.message.strip():
+        return ChatResponse(answer="Kayıtlarda bulunmuyor.")
+
+    raw = llm_provider.complete(
+        load_system_prompt("assistant_chat.md"),
+        "\n\n".join(
+            [
+                "KAYITLI_VERI:",
+                context,
+                "SORU:",
+                request.message.strip(),
+            ]
+        ),
+    )
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return ChatResponse(answer="Kayıtlarda bulunmuyor.")
+    answer = str(parsed.get("answer") or "").strip()
+    return ChatResponse(answer=answer or "Kayıtlarda bulunmuyor.")
 
 
 @router.post("", response_model=PipelineReviewResponse)
@@ -376,3 +473,33 @@ def get_audio_job_endpoint(
     if job is None:
         raise HTTPException(status_code=404, detail="Audio job bulunamadı.")
     return job
+
+
+def _registered_record_context(
+    request: ChatRequest,
+    repository: SessionRepository,
+    *,
+    clinic_id: str,
+) -> str:
+    chunks: list[str] = []
+    if request.session_id:
+        session = repository.get_session(request.session_id, clinic_id=clinic_id)
+        if session is not None:
+            chunks.append(_session_context(session))
+    if request.patient_id:
+        patient = repository.get_patient_sessions(request.patient_id, clinic_id=clinic_id)
+        if patient is not None:
+            chunks.append(json.dumps(patient, ensure_ascii=False, default=str))
+    return "\n\n".join(chunk for chunk in chunks if chunk.strip())
+
+
+def _session_context(session: dict) -> str:
+    compact = {
+        "session_id": session.get("id"),
+        "status": session.get("status"),
+        "current_stage": session.get("current_stage"),
+        "transcripts": session.get("transcripts", [])[-2:],
+        "clinical_notes": session.get("clinical_notes", [])[-2:],
+        "code_suggestions": session.get("code_suggestions", []),
+    }
+    return json.dumps(compact, ensure_ascii=False, default=str)

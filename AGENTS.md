@@ -48,6 +48,9 @@ Audio capture → audio preprocessing → ASR (+word timestamps) → diarization
 ```
 
 - **Batch**, real-time değil (V1). Ses kaydedilir, seans sonu işlenir.
+- **V1.5:** transkript GÖSTERİMİ canlıdır (Deepgram streaming, backend
+  WebSocket proxy üzerinden), ANALİZ yine batch çalışır — kayıt bitince pipeline
+  tetiklenir.
 - **REVIEW GATE:** rol ataması `unresolved`/`unknown`/`review_needed` ya da
   `manual_review_required=true` ise pipeline **durur**; not üretmeden önce hekimden
   rol düzeltmesi ister. Bu kod seviyesinde orchestration kuralıdır (bkz. §4.8).
@@ -97,6 +100,9 @@ uydurmaz) → hekim seçer.
    aralıkta mı (11–48, geçerli çeyrek) kontrol edilir. Mırıltıdan numara üretilmez.
 10. **Her şey taslaktır.** Hiçbir not/kod hekim onayı olmadan klinik geçerli
     sayılmaz. Onay ve export her zaman lisanslı hekimde.
+11. **Asistan kayıt dışına çıkmaz.** Asistan (chatbot) yalnızca kayıtlı klinik
+    veriden cevap verir. Teşhis/tedavi önerisi VERMEZ. Kayıtta olmayan bilgiyi
+    "kayıtlarda bulunmuyor" der, asla uydurmaz. Sayısal confidence göstermez.
 
 ---
 
