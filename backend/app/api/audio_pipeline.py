@@ -8,9 +8,11 @@ her durumda siler; böylece retention kuralı en baştan API kontratına girer.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 import os
 import shutil
 import tempfile
+import time
 from typing import Optional
 from uuid import uuid4
 
@@ -20,6 +22,9 @@ from pydantic import BaseModel, Field
 from app.pipeline import stages
 from app.pipeline.types import AudioRef, SpeakerLabelledTranscript
 from app.providers.audio_processing import AudioProcessingProvider, AudioProviderRuntimeError
+
+
+logger = logging.getLogger(__name__)
 
 
 class AudioProcessResponse(BaseModel):
@@ -101,7 +106,16 @@ def process_uploaded_audio(
             shutil.copyfileobj(upload.file, tmp)
 
         audio_ref = AudioRef(session_id=session_id, storage_uri=temp_path)
-        transcript = stages.transcribe_and_diarize_and_align(stages.preprocess_audio(audio_ref), provider)
+        started_at = time.time()
+        try:
+            transcript = stages.transcribe_and_diarize_and_align(stages.preprocess_audio(audio_ref), provider)
+        finally:
+            logger.warning(
+                "audio_timing stage=audio_processing_provider session_id=%s provider=%s duration_sec=%.3f",
+                session_id,
+                provider.__class__.__name__,
+                time.time() - started_at,
+            )
         response = AudioProcessResponse(
             session_id=session_id,
             status="transcript_ready",

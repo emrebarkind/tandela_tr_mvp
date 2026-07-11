@@ -24,7 +24,10 @@ içerirse, sahte/iyimser bir atama ÜRETMEZ — hepsini `unknown`/`unresolved` +
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from typing import Optional
 
 from app.pipeline import stages
 from app.pipeline.stages import SourceRoleInvariantViolation
@@ -35,11 +38,42 @@ from app.pipeline.types import (
     PipelineStatus,
     RoleAssignmentResult,
     SpeakerLabelledTranscript,
+    PerioSessionResult,
 )
 from app.providers.audio_processing import AudioProcessingProvider
 from app.providers.llm import LLMProvider
 
 logger = logging.getLogger(__name__)
+
+
+def run_perio_pipeline(dictation: str, llm_provider: LLMProvider) -> PerioSessionResult:
+    """Run the dedicated dentist-only perio dictation pipeline.
+
+    Product decision: perio is a separate, explicitly dentist-started session,
+    so role assignment is intentionally not called. The clinical-conversation
+    REVIEW GATE remains unchanged and continues to govern `run_pipeline`.
+    """
+    if not dictation.strip():
+        raise ValueError("Perio diktesi boş olamaz.")
+
+    measurements_result, summaries_result = asyncio.run(
+        _run_perio_extractions_parallel(dictation.strip(), llm_provider)
+    )
+    measurements, site_uncertainties = measurements_result
+    tooth_summaries, summary_uncertainties = summaries_result
+    uncertain_items = list(dict.fromkeys(site_uncertainties + summary_uncertainties))
+    return PerioSessionResult(
+        measurements=measurements,
+        tooth_summaries=tooth_summaries,
+        uncertain_items=uncertain_items,
+    )
+
+
+async def _run_perio_extractions_parallel(dictation: str, llm_provider: LLMProvider):
+    return await asyncio.gather(
+        asyncio.to_thread(stages.extract_perio_site_measurements, dictation, llm_provider),
+        asyncio.to_thread(stages.extract_perio_tooth_summaries, dictation, llm_provider),
+    )
 
 
 def run_pipeline(
@@ -60,7 +94,11 @@ def run_pipeline(
     speaker_labelled = stages.transcribe_and_diarize_and_align(preprocessed, provider)
     result.speaker_labelled_transcript = speaker_labelled
 
-    role_assignment = stages.assign_roles(speaker_labelled, llm_provider)
+    role_assignment = _time_pipeline_stage(
+        "assign_roles",
+        result.session_id,
+        lambda: stages.assign_roles(speaker_labelled, llm_provider),
+    )
     result.role_assignment = role_assignment
 
     if _review_gate_blocks(role_assignment):
@@ -162,10 +200,17 @@ def _continue_after_role_assignment(
     result.role_labelled_transcript = role_labelled
 
     try:
-        facts = stages.extract_clinical_facts(role_labelled, llm_provider)
-        note = stages.generate_clinical_note(facts, llm_provider)
-        procedures = stages.extract_dental_chart_commands(facts, llm_provider)
-        code_suggestions = stages.match_codes_and_checklist(procedures, facts, llm_provider)
+        facts = _time_pipeline_stage(
+            "extract_clinical_facts",
+            result.session_id,
+            lambda: stages.extract_clinical_facts(role_labelled, llm_provider),
+        )
+        note, procedures = _run_note_and_chart_parallel(facts, llm_provider, result.session_id)
+        code_suggestions = _time_pipeline_stage(
+            "match_codes_and_checklist",
+            result.session_id,
+            lambda: stages.match_codes_and_checklist(procedures, facts, llm_provider),
+        )
     except SourceRoleInvariantViolation as exc:
         logger.error(
             "source_role_invariant_violation_caught: session_id=%s speaker=%s category=%s",
@@ -185,3 +230,38 @@ def _continue_after_role_assignment(
     result.status = PipelineStatus.AWAITING_DENTIST_REVIEW
     result.stopped_at_stage = "dentist_review"
     return result
+
+
+def _time_pipeline_stage(stage_name: str, session_id: Optional[str], func):
+    started_at = time.time()
+    try:
+        return func()
+    finally:
+        duration_sec = time.time() - started_at
+        logger.warning(
+            "pipeline_timing stage=%s session_id=%s duration_sec=%.3f",
+            stage_name,
+            session_id or "unknown",
+            duration_sec,
+        )
+
+
+def _run_note_and_chart_parallel(facts, llm_provider: LLMProvider, session_id: Optional[str]):
+    return asyncio.run(_run_note_and_chart_parallel_async(facts, llm_provider, session_id))
+
+
+async def _run_note_and_chart_parallel_async(facts, llm_provider: LLMProvider, session_id: Optional[str]):
+    return await asyncio.gather(
+        asyncio.to_thread(
+            _time_pipeline_stage,
+            "generate_clinical_note",
+            session_id,
+            lambda: stages.generate_clinical_note(facts, llm_provider),
+        ),
+        asyncio.to_thread(
+            _time_pipeline_stage,
+            "extract_dental_chart_commands",
+            session_id,
+            lambda: stages.extract_dental_chart_commands(facts, llm_provider),
+        ),
+    )

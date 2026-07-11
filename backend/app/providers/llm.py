@@ -16,6 +16,7 @@ talimatı + kullanıcı girdisi ver, ham metin al" çağrı şekli her zaman ayn
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 
 class LLMProvider(ABC):
@@ -39,3 +40,13 @@ class LLMProvider(ABC):
         LLM çıktısının doğrulanmasına da uygulanır).
         """
         raise NotImplementedError
+
+    def complete_structured(
+        self, system_prompt: str, user_input: str, response_json_schema: dict[str, Any]
+    ) -> str:
+        """Return JSON constrained by a schema when the vendor supports it.
+
+        Deterministic test providers can inherit this fallback; production
+        providers should override it to enforce the schema at generation time.
+        """
+        return self.complete(system_prompt, user_input)

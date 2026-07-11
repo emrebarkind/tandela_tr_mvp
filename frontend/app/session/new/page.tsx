@@ -1,18 +1,20 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
-import { CheckCircle2, ClipboardCheck, Loader2, Mic, Save, ShieldCheck, Sparkles } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { CheckCircle2, ClipboardCheck, FileText, Loader2, Mic, PencilLine, Save, ShieldCheck, Timer, X } from "lucide-react";
+import { useHeader } from "@/components/app/HeaderContext";
 import { ApprovedExport } from "@/components/review/ApprovedExport";
-import { CodeSuggestionsPanel } from "@/components/review/CodeSuggestionsPanel";
 import { DentalChartPanel } from "@/components/review/DentalChartPanel";
 import { LiveTranscriptRecorder } from "@/components/review/LiveTranscriptRecorder";
-import { NoteDocument } from "@/components/review/NoteDocument";
-import { RoleGate } from "@/components/review/RoleGate";
 import { TranscriptDrawer } from "@/components/review/TranscriptDrawer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 type Role = "dentist" | "patient" | "assistant_or_other" | "unknown";
 type SpeakerStatus = "clear" | "review_needed" | "unresolved";
@@ -31,6 +33,7 @@ type DentalChartCondition =
   | "rct"
   | "missing"
   | "unclear";
+type ManualDentalCondition = Exclude<DentalChartCondition, "unclear">;
 
 type TranscriptUtterance = {
   speaker_id: string;
@@ -57,6 +60,8 @@ type NoteSentence = {
   text: string;
   source_quote: string;
   source_role: Role;
+  source_speaker?: string | null;
+  source_role_confidence?: "clear" | "uncertain";
 };
 
 type ClinicalNote = {
@@ -99,6 +104,8 @@ type ProcedureObject = {
   canal_count?: string | null;
   status: string;
   source_quotes: string[];
+  is_manual?: boolean;
+  manual_note?: string | null;
 };
 
 type ProcedureReview = {
@@ -116,6 +123,12 @@ type PipelineReviewResponse = {
   review_state: string;
   stopped_at_stage?: string | null;
   next_action: string;
+  role_review_required?: boolean;
+  uncertain_speakers?: {
+    speaker_id: string;
+    tentative_role: Role;
+    reason?: string | null;
+  }[];
   role_review?: {
     speakers: {
       speaker_id: string;
@@ -169,6 +182,8 @@ type NoteSectionLine = {
   text: string;
   source_quote?: string;
   source_role?: Role;
+  source_speaker?: string | null;
+  source_role_confidence?: "clear" | "uncertain";
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -178,7 +193,29 @@ const AUTH_HEADERS = {
   "X-Tandela-User-Role": process.env.NEXT_PUBLIC_TANDELA_USER_ROLE ?? "dentist",
 };
 
+const roleLabels: Record<Role, string> = {
+  dentist: "Hekim",
+  patient: "Hasta",
+  assistant_or_other: "Asistan",
+  unknown: "Bilinmeyen",
+};
+
 const transcriptLinePattern = /^([A-Za-zÇĞİÖŞÜçğıöşü0-9_-]+)\s*:\s*(.+)$/;
+
+const analysisContainerVariants = {
+  hidden: {},
+  show: {
+    transition: {
+      staggerChildren: 0.14,
+      delayChildren: 0.08,
+    },
+  },
+};
+
+const analysisItemVariants = {
+  hidden: { opacity: 0, y: 12 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.24 } },
+};
 
 type SpeechRecognitionEventLike = {
   results?: ArrayLike<ArrayLike<{ transcript?: string }>>;
@@ -194,8 +231,10 @@ type SpeechRecognitionLike = {
 };
 
 type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
+type RecorderState = "idle" | "connecting" | "recording" | "paused" | "stopping";
 
 export default function ReviewPage() {
+  const { clearHeader, setHeader } = useHeader();
   const [sessionId] = useState(() => createSessionId());
   const [patientName] = useState("Demo Danışan");
   const [encounterAt] = useState(() => toDatetimeLocalValue(new Date()));
@@ -213,6 +252,11 @@ export default function ReviewPage() {
   const [editCommand, setEditCommand] = useState("");
   const [editMessage, setEditMessage] = useState<string | null>(null);
   const [audioStatus, setAudioStatus] = useState<string | null>(null);
+  const [isRolePanelOpen, setIsRolePanelOpen] = useState(false);
+  const [roleDrafts, setRoleDrafts] = useState<Record<string, Role>>({});
+  const [recorderCommand, setRecorderCommand] = useState<{ action: "start" | "stop" | "pause" | "resume"; nonce: number } | null>(null);
+  const [recorderState, setRecorderState] = useState<RecorderState>("idle");
+  const [recordingElapsedSec, setRecordingElapsedSec] = useState(0);
   const transcriptTextRef = useRef("");
 
   const utterances = useMemo(() => parseTranscript(transcriptText), [transcriptText]);
@@ -222,13 +266,19 @@ export default function ReviewPage() {
   const dentistReview = response?.dentist_review ?? null;
   const displayedNote = editableNote ?? dentistReview?.note ?? null;
   const procedures = dentistReview?.procedures ?? [];
-  const chartProcedures = useMemo(
-    () => [...procedures.map((procedure) => procedure.procedure), ...manualChartProcedures],
-    [manualChartProcedures, procedures],
-  );
   const noteSections = displayedNote ? noteSectionsFromBackend(displayedNote) : [];
-  const needsRoleReview = response?.next_action === "review_speaker_roles";
-  const hasAnalysisDraft = response?.next_action === "review_note_and_codes" && Boolean(displayedNote);
+  const inferredChartProcedures = useMemo(
+    () => inferChartProceduresFromNoteSections(noteSections, procedures.map((procedure) => procedure.procedure)),
+    [noteSections, procedures],
+  );
+  const chartProcedures = useMemo(
+    () => uniqueChartProcedures([...procedures.map((procedure) => procedure.procedure), ...inferredChartProcedures, ...manualChartProcedures]),
+    [inferredChartProcedures, manualChartProcedures, procedures],
+  );
+  const needsRoleReview = Boolean(response?.role_review_required);
+  const hasAnalysisDraft = Boolean(displayedNote) && (response?.next_action === "review_note_and_codes" || response?.role_review_required);
+  const codeSuggestionCount = useMemo(() => procedures.reduce((total, procedure) => total + procedure.candidates.length, 0), [procedures]);
+  const isRecorderActive = recorderState === "recording" || recorderState === "connecting" || recorderState === "paused";
   const analysisState = approved
     ? "Kayda hazır"
     : hasAnalysisDraft
@@ -240,6 +290,53 @@ export default function ReviewPage() {
           : transcriptText.trim()
             ? "Analize hazır"
             : "Kayıt bekleniyor";
+
+  useEffect(() => {
+    if (!hasAnalysisDraft || !displayedNote || approved) {
+      clearHeader();
+      return;
+    }
+
+    setHeader({
+      title: patientName.trim() || "Yeni Görüşme",
+      subtitle: formatEncounterDate(encounterAt),
+      badge: (
+        <Badge className="rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-foreground hover:bg-secondary">
+          Taslak · Hekim onayı gereklidir
+        </Badge>
+      ),
+      actions: (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            className="h-10 rounded-lg px-4 text-muted-foreground hover:bg-muted"
+            onClick={() => {
+              setResponse(null);
+              setEditableNote(null);
+              setManualChartProcedures([]);
+              setApproved(false);
+              setExportPayload(null);
+            }}
+          >
+            <X className="mr-2 size-4" />
+            Vazgeç
+          </Button>
+          <Button
+            type="button"
+            className="h-10 rounded-lg bg-primary px-5 font-semibold text-primary-foreground hover:bg-primary/80"
+            onClick={() => void approveClinicalReview()}
+            disabled={isLoading || !displayedNote}
+          >
+            {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
+            İncele ve Onayla
+          </Button>
+        </div>
+      ),
+    });
+
+    return () => clearHeader();
+  }, [approved, clearHeader, displayedNote, encounterAt, hasAnalysisDraft, isLoading, patientName, setHeader]);
 
   function appendLiveTranscriptLine(line: string) {
     setTranscriptText((current) => {
@@ -316,42 +413,79 @@ export default function ReviewPage() {
     }
   }
 
-  async function approveRolesAndResume() {
-    if (!needsRoleReview) {
-      setError("Devam etmek için önce rol onayı gerektiren bir analiz sonucu olmalı.");
-      return;
-    }
-    if (!canAnalyzeTranscript) {
-      setError("Rol onayı öncesi transkript satırlarını düzeltin.");
-      return;
-    }
+  async function patchSpeakerRole(speakerId: string, role: Role) {
+    if (!response?.session_id) return;
     setIsLoading(true);
     setError(null);
     setApproved(false);
     setExportPayload(null);
     try {
       const activeSessionId = response?.session_id ?? sessionId;
-      const result = await postReviewResponse(`/sessions/${encodeURIComponent(activeSessionId)}/resume-role-review`, {
-        utterances,
-        corrected_roles: speakers.map((speaker) => ({
-          speaker_id: speaker.id,
-          role: speaker.role,
-          status: "clear",
-          reason: "Frontend review: hekim rolü onayladı.",
-        })),
+      const result = await patchReviewResponse(`/sessions/${encodeURIComponent(activeSessionId)}/speaker-role`, {
+        speaker_id: speakerId,
+        role,
+        reason: "Frontend inline rol düzeltmesi.",
       });
       setSpeakers((current) =>
-        current.map((speaker) => ({
-          ...speaker,
-          status: "clear",
-          reason: speaker.reason ?? "Frontend review: hekim rolü onayladı.",
-        })),
+        current.map((speaker) => (speaker.id === speakerId ? { ...speaker, role, status: "clear" } : speaker)),
       );
       applyBackendResponse(result);
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function applyRoleDrafts() {
+    const entries = Object.entries(roleDrafts);
+    if (!response?.session_id || !entries.length) return;
+    const hasUnknownRole = speakers
+      .filter((speaker) => speaker.status !== "clear" || speaker.role === "unknown")
+      .some((speaker) => (roleDrafts[speaker.id] ?? speaker.role) === "unknown");
+    if (hasUnknownRole) {
+      setError("Rolleri uygulamadan önce tüm belirsiz konuşmacılar için Hekim/Hasta/Asistan seçin.");
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      let latest: PipelineReviewResponse | null = null;
+      for (const [speakerId, role] of entries) {
+        latest = await patchReviewResponse(`/sessions/${encodeURIComponent(response.session_id)}/speaker-role`, {
+          speaker_id: speakerId,
+          role,
+          reason: "Frontend toplu rol düzeltmesi.",
+        });
+      }
+      if (latest) applyBackendResponse(latest);
+      setIsRolePanelOpen(false);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function addManualFinding(finding: { tooth_number_fdi: number; condition: ManualDentalCondition; note?: string }) {
+    const activeSessionId = response?.session_id ?? sessionId;
+    const optimisticProcedure: ProcedureObject = {
+      procedure_family: manualConditionFamily(finding.condition),
+      tooth_number_fdi: finding.tooth_number_fdi,
+      condition: finding.condition,
+      status: "performed",
+      source_quotes: [finding.note?.trim() || "Hekim tarafından manuel eklendi"],
+      is_manual: true,
+      manual_note: finding.note?.trim() || null,
+    };
+    setManualChartProcedures((current) => [...current, optimisticProcedure]);
+    try {
+      const result = await postReviewResponse(`/sessions/${encodeURIComponent(activeSessionId)}/findings`, finding);
+      setManualChartProcedures([]);
+      applyBackendResponse(result);
+    } catch (error) {
+      setManualChartProcedures((current) => current.filter((item) => item !== optimisticProcedure));
+      throw error;
     }
   }
 
@@ -389,7 +523,9 @@ export default function ReviewPage() {
 
   function applyBackendResponse(result: PipelineReviewResponse, sourceUtterances: TranscriptUtterance[] = utterances) {
     setResponse(result);
-    setEditableNote(result.dentist_review?.note ?? null);
+    if (result.dentist_review?.note) {
+      setEditableNote(result.dentist_review.note);
+    }
     setExportMessage(null);
     if (result.role_review) {
       setSpeakers(
@@ -401,6 +537,13 @@ export default function ReviewPage() {
           sample: sampleForSpeaker(speaker.speaker_id, sourceUtterances),
           reason: speaker.reason ?? undefined,
         })),
+      );
+      setRoleDrafts(
+        Object.fromEntries(
+          result.role_review.speakers
+            .filter((speaker) => speaker.status !== "clear" || speaker.role === "unknown")
+            .map((speaker) => [speaker.speaker_id, speaker.role]),
+        ),
       );
     }
     const firstCode = result.dentist_review?.procedures[0]?.candidates[0]?.code;
@@ -503,135 +646,178 @@ export default function ReviewPage() {
     );
   }
 
-  if (needsRoleReview) {
-    return (
-      <RoleGate
-        speakers={speakers}
-        isLoading={isLoading}
-        canApprove={canAnalyzeTranscript}
-        onRoleChange={updateSpeakerRole}
-        onApprove={() => void approveRolesAndResume()}
-      />
-    );
-  }
-
-  if (hasAnalysisDraft && displayedNote) {
-    return (
-      <main className="min-h-[calc(100vh-4rem)] bg-[#E7FEF8] p-4 text-[#0A1F1B] md:p-6">
-        <div className="mx-auto max-w-[1600px] space-y-5">
-          <section className="flex flex-wrap items-center justify-between gap-4 rounded-3xl border border-[#C0C9C1] bg-white p-5 shadow-sm">
-            <div>
-              <Badge className="rounded-full bg-[#E49545]/15 px-3 py-1 text-[#7A6221] hover:bg-[#E49545]/15">
-                Taslak · Hekim onayı gereklidir
-              </Badge>
-              <h1 className="mt-3 text-2xl font-semibold tracking-tight">Analiz tamamlandı</h1>
-              <p className="mt-1 text-sm text-[#404943]">Klinik not, diş şeması ve kod önerileri hekim incelemesine hazır.</p>
-            </div>
-            <Button
-              type="button"
-              className="h-11 rounded-full bg-[#31634B] px-6 font-semibold text-white hover:bg-[#4A7C63]"
-              onClick={() => void approveClinicalReview()}
-              disabled={isLoading || !displayedNote}
-            >
-              {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
-              Hekim Onayıyla Kayda Hazırla
-            </Button>
-          </section>
-
-          <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
-            <NoteDocument
-              sections={noteSections}
-              uncertainItems={dentistReview?.uncertain_items ?? []}
-              onSentenceChange={updateNoteSentence}
-            />
-            <aside className="space-y-5">
-              <ReviewEditPanel
-                value={editCommand}
-                message={editMessage}
-                onChange={setEditCommand}
-                onApply={applyEditCommand}
-                onDictate={startEditDictation}
-              />
-              <DentalChartPanel procedures={chartProcedures} approved={approved} />
-              <CodeSuggestionsPanel procedures={procedures} selectedCode={selectedCode} onSelectedCodeChange={setSelectedCode} />
-              <TranscriptDrawer transcriptText={transcriptText} />
-            </aside>
-          </section>
-        </div>
-      </main>
-    );
-  }
-
   return (
-    <main className="relative flex min-h-[calc(100vh-4rem)] flex-col items-center justify-center overflow-hidden bg-[#E7FEF8] px-6 py-10 text-[#0A1F1B]">
-      <div className="pointer-events-none absolute inset-0 z-0 flex items-center justify-center">
-        <div className="size-[600px] rounded-full bg-[#31634B]/5 blur-[120px]" />
-      </div>
+    <main className="relative min-h-[calc(100vh-4rem)] overflow-hidden bg-background pb-24 text-foreground">
+      <div className="mx-auto grid min-h-[calc(100vh-10rem)] w-full max-w-[1680px] gap-5 px-4 py-4 md:px-6 min-[760px]:grid-cols-[minmax(300px,0.44fr)_minmax(320px,0.56fr)]">
+        <section className="flex min-h-[720px] flex-col overflow-hidden rounded-[32px] border border-border bg-card shadow-panel">
+          <div className="border-b border-border p-6">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Yeni Görüşme</p>
+                <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">Ses ve Transkript</h1>
+                <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                  Transkript canlı akar; analiz kayıt bittikten sonra batch çalışır.
+                </p>
+              </div>
+              <StatusPill label={analysisState} />
+            </div>
+          </div>
 
-      <div className="relative z-10 flex w-full max-w-4xl flex-col items-center gap-10">
-        <section className="w-full max-w-lg rounded-[32px] border border-[#C0C9C1] bg-white p-10 text-center shadow-sm md:p-12">
-          <LiveTranscriptRecorder
-            sessionId={sessionId}
-            apiBase={API_BASE}
-            disabled={isLoading}
-            onTranscriptLine={appendLiveTranscriptLine}
-            onRecordingStopped={(audioBlob) => void processAudioFallback(audioBlob)}
-          />
-          <Button
-            type="button"
-            className="mt-4 h-11 rounded-full bg-[#31634B] px-6 font-semibold text-white shadow-sm hover:bg-[#4A7C63]"
-            onClick={() => void analyzeTranscript()}
-            disabled={isLoading || !canAnalyzeTranscript}
-          >
-            {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Sparkles className="mr-2 size-4" />}
-            Analiz Et
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className="mt-4 rounded-full text-[#31634B]"
-            onClick={() => updateTranscriptText(sampleDashboardTranscript())}
-          >
-            Demo transkript yükle
-          </Button>
+          <div className="border-b border-border p-6">
+            <LiveTranscriptRecorder
+              sessionId={sessionId}
+              apiBase={API_BASE}
+              disabled={isLoading}
+              showInlineControls={false}
+              controlCommand={recorderCommand}
+              onStateChange={setRecorderState}
+              onElapsedChange={setRecordingElapsedSec}
+              onTranscriptLine={appendLiveTranscriptLine}
+              onRecordingStopped={(audioBlob) => void processAudioFallback(audioBlob)}
+            />
+          </div>
+
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex items-center justify-between border-b border-border px-6 py-4">
+              <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                <span className={`size-2 rounded-full ${isLoading ? "bg-primary" : transcriptText.trim() ? "bg-primary" : "bg-muted-foreground"}`} />
+                Canlı Transkript
+              </span>
+              <span className="text-xs font-semibold text-muted-foreground">
+                {transcriptDiagnostics.speakerCount} konuşmacı · {transcriptDiagnostics.utteranceCount} ifade
+              </span>
+            </div>
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-background/60 px-5 py-5">
+              {utterances.length ? (
+                utterances.map((utterance, index) => (
+                  <TranscriptBubble key={`${utterance.speaker_id}-${index}`} speaker={utterance.speaker_id} text={utterance.text} />
+                ))
+              ) : (
+                <EmptyListeningBubble />
+              )}
+            </div>
+            <div className="border-t border-border bg-card/80 p-4">
+              <Textarea
+                className="min-h-[104px] resize-y rounded-2xl border-border bg-background text-sm leading-6"
+                value={transcriptText}
+                onChange={(event) => updateTranscriptText(event.target.value)}
+                placeholder="A: Merhaba, şikayetiniz nedir?"
+                aria-label="Transkript"
+              />
+              {audioStatus ? <p className="mt-2 text-sm text-muted-foreground">{audioStatus}</p> : null}
+              {error ? <p className="mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">{error}</p> : null}
+            </div>
+          </div>
         </section>
 
-        <section className="flex h-80 w-full flex-col">
-          <div className="mb-4 flex items-center justify-between px-4">
-            <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-[#404943]">
-              <span className="size-2 rounded-full bg-[#31634B] animate-pulse" />
-              Canlı Transkript
-            </span>
-            <button className="text-xs font-semibold text-[#31634B] hover:underline" type="button" onClick={() => updateTranscriptText("")}>
-              Kaydı Bitir
-            </button>
+        <section className="min-h-[720px] overflow-hidden rounded-[32px] border border-border bg-card shadow-panel">
+          <div className="flex items-start justify-between gap-4 border-b border-border p-6">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Analiz</p>
+              <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">Klinik Taslak</h2>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                Sonuçlar backend tamamlandıktan sonra bölüm bölüm gösterilir.
+              </p>
+            </div>
+            <Badge className="rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-foreground hover:bg-secondary">
+              Taslak · Hekim onayı gereklidir
+            </Badge>
           </div>
-          <div className="flex-1 space-y-4 overflow-y-auto px-4 pb-20">
-            {utterances.length ? (
-              utterances.map((utterance, index) => (
-                <TranscriptBubble key={`${utterance.speaker_id}-${index}`} speaker={utterance.speaker_id} text={utterance.text} />
-              ))
+
+          <div className="h-[calc(100%-97px)] overflow-y-auto p-5">
+            {needsRoleReview ? (
+              <div className="mb-4 rounded-2xl border border-secondary bg-secondary px-4 py-3 text-sm text-foreground">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="font-semibold">Konuşmacı rolleri kesin değil — kontrol edin</p>
+                  <div className="flex items-center gap-2">
+                    <Badge className="rounded-full bg-card text-foreground hover:bg-card">
+                      {response?.uncertain_speakers?.length ?? speakers.filter((speaker) => speaker.status !== "clear").length} konuşmacı belirsiz
+                    </Badge>
+                    <Button type="button" variant="outline" className="h-8 border-border bg-card text-xs text-foreground" onClick={() => setIsRolePanelOpen((value) => !value)}>
+                      Rolleri Düzenle
+                    </Button>
+                  </div>
+                </div>
+                {isRolePanelOpen ? (
+                  <RoleReviewPanel
+                    speakers={speakers.filter((speaker) => speaker.status !== "clear" || speaker.role === "unknown")}
+                    roleDrafts={roleDrafts}
+                    isLoading={isLoading}
+                    onRoleChange={(speakerId, role) => setRoleDrafts((current) => ({ ...current, [speakerId]: role }))}
+                    onApply={() => void applyRoleDrafts()}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+
+            {hasAnalysisDraft && displayedNote ? (
+              <motion.div initial="hidden" animate="show" variants={analysisContainerVariants}>
+                <SmartReviewWorkspace
+                  chartProcedures={chartProcedures}
+                  procedures={procedures}
+                  noteSections={noteSections}
+                  uncertainItems={dentistReview?.uncertain_items ?? []}
+                  selectedCode={selectedCode}
+                  onSelectedCodeChange={setSelectedCode}
+                  approved={approved}
+                  isLoading={false}
+                  editCommand={editCommand}
+                  editMessage={editMessage}
+                  onEditCommandChange={setEditCommand}
+                  onApplyEditCommand={applyEditCommand}
+                  onDictateEditCommand={startEditDictation}
+                  onAddFinding={addManualFinding}
+                />
+              </motion.div>
             ) : (
-              <EmptyListeningBubble />
+              <AnalysisSkeleton isLoading={isLoading} hasTranscript={Boolean(transcriptText.trim())} />
             )}
           </div>
         </section>
+      </div>
 
-        <section className="w-full rounded-3xl border border-[#C0C9C1] bg-white/70 p-4 shadow-sm backdrop-blur">
-          <Textarea
-            className="min-h-[120px] resize-y rounded-2xl border-[#C0C9C1] bg-white/80 text-sm leading-6"
-            value={transcriptText}
-            onChange={(event) => updateTranscriptText(event.target.value)}
-            placeholder="A: Merhaba, şikayetiniz nedir?"
-            aria-label="Transkript"
-          />
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-[#404943]">
-            <span>{transcriptDiagnostics.speakerCount} konuşmacı · {transcriptDiagnostics.utteranceCount} ifade</span>
-            <span>Taslak · Hekim onayı gereklidir</span>
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/92 px-4 py-3 shadow-panel backdrop-blur-md">
+        <div className="mx-auto flex max-w-[1680px] flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <span className="inline-flex h-10 items-center gap-2 rounded-full border border-border bg-background px-3 font-semibold text-foreground">
+              <Timer className="size-4 text-primary" />
+              {formatDuration(recordingElapsedSec)}
+            </span>
+            <span>{analysisState}</span>
           </div>
-          {audioStatus ? <p className="mt-2 text-sm text-[#404943]">{audioStatus}</p> : null}
-          {error ? <p className="mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">{error}</p> : null}
-        </section>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 rounded-full border-border bg-card px-4 text-muted-foreground"
+              onClick={() => setRecorderCommand({ action: recorderState === "paused" ? "resume" : "pause", nonce: Date.now() })}
+              disabled={isLoading || !(recorderState === "recording" || recorderState === "paused")}
+            >
+              {recorderState === "paused" ? "Sürdür" : "Duraklat"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 rounded-full border-border bg-card px-4 text-primary"
+              onClick={() => setRecorderCommand({ action: isRecorderActive ? "stop" : "start", nonce: Date.now() })}
+              disabled={isLoading || recorderState === "connecting" || recorderState === "stopping"}
+            >
+              {isRecorderActive ? "Durdur" : "Kaydı Başlat"}
+            </Button>
+            <Button type="button" variant="ghost" className="h-10 rounded-full text-primary" onClick={() => updateTranscriptText(sampleDashboardTranscript())}>
+              Demo transkript yükle
+            </Button>
+            <Button
+              type="button"
+              className="h-10 rounded-full bg-primary px-5 font-semibold text-primary-foreground hover:bg-primary"
+              onClick={() => void analyzeTranscript()}
+              disabled={isLoading || !canAnalyzeTranscript}
+            >
+              {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <ClipboardCheck className="mr-2 size-4" />}
+              Analiz Et
+            </Button>
+          </div>
+        </div>
       </div>
     </main>
   );
@@ -640,6 +826,19 @@ export default function ReviewPage() {
 async function postReviewResponse(path: string, body: unknown): Promise<PipelineReviewResponse> {
   const response = await fetch(`${API_BASE}${path}`, {
     method: "POST",
+    headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return response.json() as Promise<PipelineReviewResponse>;
+}
+
+async function patchReviewResponse(path: string, body: unknown): Promise<PipelineReviewResponse> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
     headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -717,6 +916,13 @@ function formatExportPayload(payload: ExportPayload) {
   ].join("\n");
 }
 
+function formatDuration(totalSec: number) {
+  const hours = Math.floor(totalSec / 3600).toString().padStart(2, "0");
+  const minutes = Math.floor((totalSec % 3600) / 60).toString().padStart(2, "0");
+  const seconds = (totalSec % 60).toString().padStart(2, "0");
+  return `${hours}:${minutes}:${seconds}`;
+}
+
 function noteSectionsFromBackend(note: ClinicalNote): NoteSection[] {
   return [
     { id: "patient_complaint", title: "Hasta şikayeti", lines: note.patient_complaint.map(noteLineFromSentence) },
@@ -733,7 +939,49 @@ function noteLineFromSentence(sentence: NoteSentence): NoteSectionLine {
     text: sentence.text,
     source_quote: sentence.source_quote,
     source_role: sentence.source_role,
+    source_speaker: sentence.source_speaker,
+    source_role_confidence: sentence.source_role_confidence,
   };
+}
+
+function inferChartProceduresFromNoteSections(noteSections: NoteSection[], existingProcedures: ProcedureObject[]) {
+  const existingKeys = new Set(existingProcedures.map(chartProcedureKey));
+  const inferred: ProcedureObject[] = [];
+
+  noteSections.forEach((section) => {
+    section.lines.forEach((line) => {
+      const source = line.source_quote || line.text;
+      const chartProcedure = parseDentalChartCommand(source);
+      if (!chartProcedure) return;
+
+      const key = chartProcedureKey(chartProcedure);
+      if (existingKeys.has(key)) return;
+
+      existingKeys.add(key);
+      inferred.push({
+        ...chartProcedure,
+        source_quotes: [source],
+      });
+    });
+  });
+
+  return inferred;
+}
+
+function chartProcedureKey(procedure: ProcedureObject) {
+  const tooth = procedure.tooth_number_fdi ?? "unknown";
+  const condition = procedure.condition ?? procedure.procedure_family ?? "unknown";
+  return `${tooth}:${condition}`;
+}
+
+function uniqueChartProcedures(procedures: ProcedureObject[]) {
+  const seen = new Set<string>();
+  return procedures.filter((procedure) => {
+    const key = chartProcedureKey(procedure);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function sampleForSpeaker(speakerId: string, utterances: TranscriptUtterance[]) {
@@ -748,11 +996,350 @@ function errorMessage(error: unknown) {
 function StatusPill({ label }: { label: string }) {
   const isReady = label === "Taslak hazır" || label === "Kayda hazır";
   return (
-    <span className="inline-flex h-11 items-center rounded-full border border-[#DDE3E0] bg-[#F8F9F7] px-3 text-sm font-medium shadow-sm">
-      <CheckCircle2 className={`mr-2 size-4 ${isReady ? "text-[#4A7C63]" : "text-muted-foreground"}`} />
+    <span className="inline-flex h-11 items-center rounded-full border border-border bg-background px-3 text-sm font-medium shadow-card">
+      <CheckCircle2 className={`mr-2 size-4 ${isReady ? "text-primary" : "text-muted-foreground"}`} />
       {label}
     </span>
   );
+}
+
+function AnalysisSkeleton({ isLoading, hasTranscript }: { isLoading: boolean; hasTranscript: boolean }) {
+  const title = isLoading ? "Analiz hazırlanıyor" : hasTranscript ? "Analiz için hazır" : "Kayıt bekleniyor";
+  const subtitle = isLoading
+    ? "Backend batch pipeline tamamlanana kadar gerçek içerik gösterilmeyecek."
+    : hasTranscript
+      ? "Analiz Et ile klinik not, diş şeması ve kod taslağı üretilecek."
+      : "Sol panelde konuşma başladığında transkript burada analiz bekleyecek.";
+
+  return (
+    <div className="space-y-5">
+      <Card className="border-border bg-background shadow-card">
+        <CardHeader className="border-b border-border px-5 py-4">
+          <CardTitle className="text-base font-semibold tracking-tight text-foreground">{title}</CardTitle>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">{subtitle}</p>
+        </CardHeader>
+        <CardContent className="space-y-4 p-5">
+          <div className="rounded-2xl border border-border bg-card p-4">
+            <Skeleton className="h-4 w-36 bg-muted" />
+            <div className="mt-5 space-y-3">
+              <Skeleton className="h-4 w-full bg-muted" />
+              <Skeleton className="h-4 w-11/12 bg-muted" />
+              <Skeleton className="h-4 w-2/3 bg-muted" />
+            </div>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="rounded-2xl border border-border bg-card p-4">
+              <Skeleton className="h-4 w-28 bg-muted" />
+              <div className="mt-5 grid grid-cols-8 gap-2">
+                {Array.from({ length: 24 }, (_, index) => (
+                  <Skeleton key={index} className="h-7 rounded-[45%] bg-muted" />
+                ))}
+              </div>
+            </div>
+            <div className="space-y-3 rounded-2xl border border-border bg-card p-4">
+              <Skeleton className="h-4 w-28 bg-muted" />
+              <Skeleton className="h-12 w-full rounded-xl bg-muted" />
+              <Skeleton className="h-12 w-full rounded-xl bg-muted" />
+              <Skeleton className="h-12 w-4/5 rounded-xl bg-muted" />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      <p className="rounded-2xl border border-border bg-card px-4 py-3 text-sm leading-6 text-muted-foreground">
+        V1.5 kuralı: canlı transkript görünür; klinik analiz konuşma/kayıt bittikten sonra batch çalışır.
+      </p>
+    </div>
+  );
+}
+
+function SmartReviewWorkspace({
+  chartProcedures,
+  procedures,
+  noteSections,
+  uncertainItems,
+  selectedCode,
+  onSelectedCodeChange,
+  approved,
+  isLoading,
+  editCommand,
+  editMessage,
+  onEditCommandChange,
+  onApplyEditCommand,
+  onDictateEditCommand,
+  onAddFinding,
+}: {
+  chartProcedures: ProcedureObject[];
+  procedures: ProcedureReview[];
+  noteSections: NoteSection[];
+  uncertainItems: string[];
+  selectedCode: string;
+  onSelectedCodeChange: (code: string) => void;
+  approved: boolean;
+  isLoading: boolean;
+  editCommand: string;
+  editMessage: string | null;
+  onEditCommandChange: (value: string) => void;
+  onApplyEditCommand: () => void;
+  onDictateEditCommand: () => void;
+  onAddFinding: (finding: { tooth_number_fdi: number; condition: ManualDentalCondition; note?: string }) => Promise<void>;
+}) {
+  const [verifiedNotes, setVerifiedNotes] = useState<Record<string, boolean>>({});
+  const [verifiedCodes, setVerifiedCodes] = useState<Record<string, boolean>>({});
+  const [highlightedSource, setHighlightedSource] = useState<{ label: string; quote: string } | null>(null);
+  const noteCards = noteSections.flatMap((section) =>
+    section.lines.map((line, index) => ({
+      key: `${section.id}-${index}-${line.source_quote ?? line.text}`,
+      section: section.title,
+      text: line.text,
+      sourceQuote: line.source_quote,
+      sourceRole: line.source_role,
+      needsRoleReview: line.source_role_confidence === "uncertain",
+    })),
+  );
+  const codeCards = procedures.flatMap((procedure, procedureIndex) =>
+    procedure.candidates.map((candidate) => ({
+      key: `${procedureIndex}-${candidate.code}`,
+      code: candidate.code,
+      title: candidate.procedure_name,
+      category: candidate.category,
+      tooth: procedure.procedure.tooth_number_fdi,
+      sourceQuote: procedure.procedure.source_quotes?.[0],
+      matchState: procedure.match_results.find((result) => result.code === candidate.code)?.match_state ?? "needs_review",
+    })),
+  );
+
+  return (
+    <TooltipProvider delay={180}>
+      <div className="relative grid gap-5 md:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_420px]">
+        <motion.section variants={analysisItemVariants} className="min-w-0 rounded-[32px] border border-border bg-card/80 p-4 shadow-panel backdrop-blur">
+          <DentalChartPanel procedures={chartProcedures} approved={approved} onAddFinding={onAddFinding} layout="canvas" isLoading={isLoading} />
+          <LivingVoiceOrb active={isLoading} highlightedSource={highlightedSource} />
+        </motion.section>
+
+        <aside className="space-y-4">
+        <motion.div variants={analysisItemVariants}>
+        <Card className="border-border bg-card/70 shadow-panel backdrop-blur-md">
+          <CardHeader className="border-b border-border/70 px-5 py-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground">
+                  <FileText className="size-4 text-primary" aria-hidden="true" />
+                  AI Taslağı
+                </CardTitle>
+                <p className="mt-1 text-xs font-medium text-muted-foreground">Öneri olarak gelir; son söz hekimde.</p>
+              </div>
+              <Tooltip>
+                <TooltipTrigger>
+                  <Badge className="rounded-full bg-secondary px-2.5 py-1 text-[11px] font-semibold text-foreground hover:bg-secondary">
+                    AI taslağı
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent side="left" className="max-w-64 bg-foreground text-primary-foreground">
+                  AI tarafından taslak olarak oluşturuldu. Doğruluğunu hekim kontrol eder.
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          </CardHeader>
+          <CardContent className="max-h-[420px] space-y-3 overflow-y-auto p-5">
+            {noteCards.length ? noteCards.map((card, index) => (
+              <motion.div
+                key={card.key}
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.22, delay: Math.min(index * 0.035, 0.18) }}
+                onMouseEnter={() => card.sourceQuote ? setHighlightedSource({ label: card.section, quote: card.sourceQuote }) : null}
+                onMouseLeave={() => setHighlightedSource(null)}
+                className={`group rounded-2xl border p-4 backdrop-blur-md transition-all ${
+                  verifiedNotes[card.key]
+                    ? "border-ring/45 bg-primary/8"
+                    : "border-border bg-card/55 hover:border-ring/45 hover:bg-card/80"
+                }`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">{card.section}</p>
+                    <p className="mt-2 text-sm leading-6 text-foreground">{card.text}</p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className={`h-8 shrink-0 rounded-lg border-border bg-card/80 hover:bg-secondary ${
+                      verifiedNotes[card.key] ? "text-primary" : "text-muted-foreground"
+                    }`}
+                    onClick={() => setVerifiedNotes((current) => ({ ...current, [card.key]: !current[card.key] }))}
+                  >
+                    <CheckCircle2 className="mr-1.5 size-3.5" />
+                    {verifiedNotes[card.key] ? "Doğrulandı" : "Doğrula"}
+                  </Button>
+                </div>
+                <button
+                  type="button"
+                  className="mt-3 inline-flex items-center rounded-lg text-xs font-semibold text-primary transition hover:text-foreground"
+                  onClick={() => onEditCommandChange(card.text)}
+                >
+                  <PencilLine className="mr-1.5 size-3.5" aria-hidden="true" />
+                  Düzenle
+                </button>
+                {card.sourceQuote ? (
+                  <p className="mt-3 border-l-2 border-ring bg-card/60 py-1 pl-3 text-xs italic leading-5 text-muted-foreground transition-colors group-hover:bg-secondary group-hover:text-foreground">
+                    Kaynak: {roleLabels[card.sourceRole ?? "unknown"]}: {card.sourceQuote}
+                  </p>
+                ) : null}
+                {card.needsRoleReview ? (
+                  <p className="mt-2 rounded-lg bg-secondary px-3 py-2 text-xs font-medium text-foreground">
+                    Konuşmacı rolü kontrol edilmeli.
+                  </p>
+                ) : null}
+              </motion.div>
+            )) : (
+              <p className="rounded-xl border border-dashed border-border bg-background px-4 py-3 text-sm text-muted-foreground">
+                Not taslağı henüz oluşmadı.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+        </motion.div>
+
+        <motion.div variants={analysisItemVariants}>
+        <Card className="border-border bg-card/70 shadow-panel backdrop-blur-md">
+          <CardHeader className="border-b border-border/70 px-5 py-4">
+            <CardTitle className="text-base font-semibold tracking-tight text-foreground">Önerilen TDB Kodları</CardTitle>
+            <p className="mt-1 text-xs font-medium text-muted-foreground">Kapalı kod veritabanından adaylar; son seçim hekimde.</p>
+          </CardHeader>
+          <CardContent className="space-y-3 p-5">
+            {codeCards.length ? codeCards.map((card, index) => (
+              <motion.button
+                key={card.key}
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.22, delay: Math.min(index * 0.035, 0.18) }}
+                onMouseEnter={() => card.sourceQuote ? setHighlightedSource({ label: card.code, quote: card.sourceQuote }) : null}
+                onMouseLeave={() => setHighlightedSource(null)}
+                className={`group w-full rounded-2xl border p-4 text-left backdrop-blur-md transition ${
+                  verifiedCodes[card.key]
+                    ? "border-ring bg-primary/10"
+                    : selectedCode === card.code
+                    ? "border-ring bg-primary/10"
+                    : "border-border bg-card/55 hover:border-ring/45 hover:bg-card/80"
+                }`}
+                type="button"
+                onClick={() => onSelectedCodeChange(card.code)}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-semibold text-foreground">{card.code}</p>
+                    <p className="mt-1 text-sm leading-6 text-muted-foreground">{card.title}</p>
+                  </div>
+                  <Badge className={`shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold ${codeStateClassName(card.matchState)}`}>
+                    {codeStateLabel(card.matchState)}
+                  </Badge>
+                </div>
+                <p className="mt-3 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                  {card.category} · FDI {card.tooth ?? "Belirsiz"}
+                </p>
+                {card.sourceQuote ? (
+                  <p className="mt-3 border-l-2 border-ring bg-card/60 py-1 pl-3 text-xs italic leading-5 text-muted-foreground transition-colors group-hover:bg-secondary group-hover:text-foreground">
+                    Kaynak: {card.sourceQuote}
+                  </p>
+                ) : null}
+                <span
+                  className="mt-3 inline-flex h-8 items-center rounded-lg border border-border bg-card px-3 text-xs font-semibold text-primary"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setVerifiedCodes((current) => ({ ...current, [card.key]: !current[card.key] }));
+                  }}
+                >
+                  <CheckCircle2 className="mr-1.5 size-3.5" />
+                  {verifiedCodes[card.key] ? "Doğrulandı" : "Doğrula"}
+                </span>
+              </motion.button>
+            )) : (
+              <p className="rounded-xl border border-dashed border-border bg-background px-4 py-3 text-sm text-muted-foreground">
+                Kod önerisi için yeterli işlem bilgisi yok.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+        </motion.div>
+
+        {uncertainItems.length ? (
+          <motion.div variants={analysisItemVariants}>
+          <Card className="border-secondary bg-secondary shadow-card">
+            <CardHeader className="border-b border-secondary px-5 py-4">
+              <CardTitle className="text-base font-semibold tracking-tight text-foreground">Unutulmuş olabilir</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 p-5">
+              {uncertainItems.map((item, index) => (
+                <p key={`${index}-${item}`} className="rounded-xl bg-card px-3 py-2 text-sm leading-6 text-foreground">
+                  {item}
+                </p>
+              ))}
+            </CardContent>
+          </Card>
+          </motion.div>
+        ) : null}
+
+        <motion.div variants={analysisItemVariants}>
+        <ReviewEditPanel
+          value={editCommand}
+          message={editMessage}
+          onChange={onEditCommandChange}
+          onApply={onApplyEditCommand}
+          onDictate={onDictateEditCommand}
+        />
+        </motion.div>
+        </aside>
+      </div>
+    </TooltipProvider>
+  );
+}
+
+function LivingVoiceOrb({ active, highlightedSource }: { active: boolean; highlightedSource: { label: string; quote: string } | null }) {
+  return (
+    <div className="pointer-events-none absolute bottom-5 left-5 z-10 flex max-w-[520px] items-end gap-3">
+      <div className="relative grid size-16 shrink-0 place-items-center rounded-full border border-ring/30 bg-card/75 shadow-card backdrop-blur-md">
+        <motion.span
+          className="absolute inset-2 rounded-full border border-ring/25"
+          animate={{ scale: active ? [1, 1.08, 1] : [1, 1.03, 1], opacity: active ? [0.4, 0.72, 0.4] : [0.28, 0.42, 0.28] }}
+          transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+        />
+        <motion.span
+          className="relative size-8 rounded-full bg-secondary"
+          animate={{ y: active ? [0, -2, 0] : [0, 1, 0] }}
+          transition={{ duration: 2.4, repeat: Infinity, ease: "easeInOut" }}
+        />
+      </div>
+      <AnimatePresence>
+        {highlightedSource ? (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.18 }}
+            className="mb-1 rounded-2xl border border-ring/25 bg-card/85 px-4 py-3 shadow-card backdrop-blur-md"
+          >
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary">Kaynak vurgusu · {highlightedSource.label}</p>
+            <p className="mt-1 line-clamp-2 text-xs italic leading-5 text-muted-foreground">{highlightedSource.quote}</p>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function codeStateLabel(state: string) {
+  if (state === "confirmed_by_documentation") return "Dokümantasyon Tam";
+  if (state === "ambiguous_multiple_candidates") return "Hekim Seçmeli";
+  if (state === "no_match") return "Eşleşme Yok";
+  return "Eksik Bilgi";
+}
+
+function codeStateClassName(state: string) {
+  if (state === "confirmed_by_documentation") return "bg-primary/15 text-primary";
+  if (state === "ambiguous_multiple_candidates") return "bg-secondary text-foreground";
+  if (state === "no_match") return "bg-muted text-muted-foreground";
+  return "bg-secondary text-foreground";
 }
 
 function ReviewEditPanel({
@@ -769,37 +1356,103 @@ function ReviewEditPanel({
   onDictate: () => void;
 }) {
   return (
-    <Card className="overflow-hidden border-[#DDE3E0] bg-white shadow-sm">
-      <CardHeader className="border-b border-[#DDE3E0] px-5 py-4">
-        <CardTitle className="text-base font-semibold tracking-tight text-[#202422]">Notu Düzenle</CardTitle>
-        <p className="mt-1 text-xs font-medium text-[#6F7470]">Yazarak veya konuşarak taslağa ekleyin</p>
+    <Card className="overflow-hidden border-border bg-card shadow-card">
+      <CardHeader className="border-b border-border px-5 py-4">
+        <CardTitle className="text-base font-semibold tracking-tight text-foreground">Notu Düzenle</CardTitle>
+        <p className="mt-1 text-xs font-medium text-muted-foreground">Yazarak veya konuşarak taslağa ekleyin</p>
       </CardHeader>
       <CardContent className="space-y-3 p-5">
         <Textarea
-          className="min-h-[112px] resize-y rounded-2xl border-[#DDE3E0] bg-[#F8F9F7] text-sm leading-6"
+          className="min-h-[112px] resize-y rounded-2xl border-border bg-background text-sm leading-6"
           value={value}
           onChange={(event) => onChange(event.target.value)}
           placeholder="Örn: 44 numarada okluzal çürük var. 46 için kanal tedavisi planlandı."
           aria-label="Klinik not düzeltmesi"
         />
         <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" className="rounded-full border-[#DDE3E0] bg-white" onClick={onDictate}>
+          <Button type="button" variant="outline" className="rounded-full border-border bg-card" onClick={onDictate}>
             <Mic className="mr-2 size-4" />
             Sesle Gir
           </Button>
           <Button
             type="button"
-            className="rounded-full bg-[#31634B] px-5 font-semibold text-white hover:bg-[#4A7C63]"
+            className="rounded-full bg-primary px-5 font-semibold text-primary-foreground hover:bg-primary"
             onClick={onApply}
             disabled={!value.trim()}
           >
             Uygula
           </Button>
         </div>
-        {message ? <p className="rounded-xl bg-[#E1F9F2] px-3 py-2 text-sm leading-6 text-[#224F3B]">{message}</p> : null}
-        <p className="text-xs leading-5 text-[#6F7470]">
+        {message ? <p className="rounded-xl bg-secondary px-3 py-2 text-sm leading-6 text-foreground">{message}</p> : null}
+        <p className="text-xs leading-5 text-muted-foreground">
           Diş şeması yalnızca net FDI numarası ve kondisyon varsa güncellenir; belirsiz ifadeler chart'a işlenmez.
         </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RoleReviewPanel({
+  speakers,
+  roleDrafts,
+  isLoading,
+  onRoleChange,
+  onApply,
+}: {
+  speakers: Speaker[];
+  roleDrafts: Record<string, Role>;
+  isLoading: boolean;
+  onRoleChange: (speakerId: string, role: Role) => void;
+  onApply: () => void;
+}) {
+  const hasUnknownRole = speakers.some((speaker) => (roleDrafts[speaker.id] ?? speaker.role) === "unknown");
+  return (
+    <div className="mt-4 space-y-3 rounded-xl border border-secondary bg-card p-3">
+      {speakers.length ? (
+        speakers.map((speaker) => (
+          <div key={speaker.id} className="grid gap-3 rounded-lg border border-border bg-background p-3 md:grid-cols-[110px_180px_minmax(0,1fr)] md:items-center">
+            <div>
+              <p className="text-sm font-semibold text-foreground">Speaker {speaker.id}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{speaker.utterances} ifade</p>
+            </div>
+            <Select value={roleDrafts[speaker.id] ?? speaker.role} onValueChange={(value) => onRoleChange(speaker.id, value as Role)}>
+              <SelectTrigger className="h-10 border-border bg-card text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="dentist">Hekim</SelectItem>
+                <SelectItem value="patient">Hasta</SelectItem>
+                <SelectItem value="assistant_or_other">Asistan</SelectItem>
+                <SelectItem value="unknown">Bilinmiyor</SelectItem>
+              </SelectContent>
+            </Select>
+            <div>
+              <p className="text-sm leading-6 text-foreground">{speaker.sample}</p>
+              {speaker.reason ? <p className="mt-1 text-xs italic leading-5 text-muted-foreground">{speaker.reason}</p> : null}
+            </div>
+          </div>
+        ))
+      ) : (
+        <p className="text-sm text-muted-foreground">Belirsiz konuşmacı kalmadı.</p>
+      )}
+      <Button type="button" className="h-10 w-full bg-primary text-primary-foreground hover:bg-primary/80" onClick={onApply} disabled={isLoading || !speakers.length || hasUnknownRole}>
+        Rolleri Uygula
+      </Button>
+    </div>
+  );
+}
+
+function TranscriptReviewPanel({ transcriptText }: { transcriptText: string }) {
+  return (
+    <Card className="border-border bg-card shadow-card">
+      <CardHeader className="border-b border-border px-6 py-5">
+        <CardTitle className="text-lg font-semibold tracking-tight text-foreground">Transkript</CardTitle>
+        <p className="mt-1 text-sm text-muted-foreground">Kaynak konuşma metni; klinik not ve bulgular bu metinden türetilir.</p>
+      </CardHeader>
+      <CardContent className="p-6">
+        <pre className="max-h-[720px] overflow-auto whitespace-pre-wrap rounded-2xl border border-border bg-background p-5 text-sm leading-7 text-foreground">
+          {transcriptText || "Transkript yok."}
+        </pre>
       </CardContent>
     </Card>
   );
@@ -812,13 +1465,13 @@ function TranscriptBubble({ speaker, text }: { speaker: string; text: string }) 
   const label = isDentistLike ? "HEKİM" : normalized === "B" ? "HASTA" : `KONUŞMACI ${speaker}`;
   const labelSpacing = isDentistLike ? "ml-4" : "mr-4";
   const bubbleClass = isDentistLike
-    ? "rounded-tl-none bg-[#4A7C63] text-[#E3FFED]"
-    : "rounded-tr-none bg-[#BCEED2] text-[#002114]";
+    ? "rounded-tl-none bg-primary text-primary-foreground"
+    : "rounded-tr-none bg-secondary text-foreground";
 
   return (
     <div className={`flex flex-col ${align}`}>
-      <span className={`mb-1 text-[10px] font-bold text-[#31634B] ${labelSpacing}`}>{label}</span>
-      <div className={`max-w-md rounded-2xl p-4 shadow-sm ${bubbleClass}`}>
+      <span className={`mb-1 text-[10px] font-bold text-primary ${labelSpacing}`}>{label}</span>
+      <div className={`max-w-md rounded-2xl p-4 shadow-card ${bubbleClass}`}>
         <p className="text-sm leading-6">{text}</p>
       </div>
     </div>
@@ -902,16 +1555,23 @@ function procedureFamilyForCondition(condition: DentalChartCondition) {
   return condition;
 }
 
+function manualConditionFamily(condition: ManualDentalCondition) {
+  if (condition === "rct") return "kanal_tedavisi";
+  if (condition === "composite") return "kompozit_dolgu";
+  if (condition === "missing") return "dis_cekimi";
+  return "manuel_bulgu";
+}
+
 function EmptyListeningBubble() {
   return (
     <div className="flex flex-col items-end">
-      <span className="mb-1 mr-4 text-[10px] font-bold text-[#3A6751]">HASTA</span>
-      <div className="max-w-md rounded-2xl rounded-tr-none border border-dashed border-[#3A6751]/30 bg-[#BCEED2]/50 p-4 text-[#406D57] shadow-sm">
+      <span className="mb-1 mr-4 text-[10px] font-bold text-primary">HASTA</span>
+      <div className="max-w-md rounded-2xl rounded-tr-none border border-dashed border-primary bg-secondary/50 p-4 text-muted-foreground shadow-card">
         <p className="flex items-center gap-2 text-sm italic leading-6">
           <span className="flex gap-1">
-            <span className="size-1 rounded-full bg-[#3A6751] animate-bounce" />
-            <span className="size-1 rounded-full bg-[#3A6751] animate-bounce [animation-delay:-0.15s]" />
-            <span className="size-1 rounded-full bg-[#3A6751] animate-bounce [animation-delay:-0.3s]" />
+            <span className="size-1 rounded-full bg-primary animate-bounce" />
+            <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.15s]" />
+            <span className="size-1 rounded-full bg-primary animate-bounce [animation-delay:-0.3s]" />
           </span>
           Dinleniyor...
         </p>
@@ -922,25 +1582,25 @@ function EmptyListeningBubble() {
 
 function EmptyClinicalNote() {
   return (
-    <Card className="min-h-[760px] border-[#DDE3E0] bg-white shadow-sm">
-      <CardHeader className="border-b border-[#DDE3E0] p-7 md:p-10">
+    <Card className="min-h-[760px] border-border bg-card shadow-card">
+      <CardHeader className="border-b border-border p-7 md:p-10">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#6F7470]">Klinik Not Taslağı</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Klinik Not Taslağı</p>
             <CardTitle className="mt-3 text-3xl font-semibold tracking-tight">Kapsamlı Muayene</CardTitle>
           </div>
-          <Badge className="rounded-full bg-[#E49545]/15 px-3 py-1.5 text-xs font-semibold text-[#7A6221] hover:bg-[#E49545]/15">
+          <Badge className="rounded-full bg-secondary px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary">
             Taslak · Hekim onayı gereklidir
           </Badge>
         </div>
       </CardHeader>
       <CardContent className="flex min-h-[590px] items-center justify-center p-10">
         <div className="max-w-md text-center">
-          <div className="mx-auto grid size-14 place-items-center rounded-2xl bg-[#4A7C63]/10 text-[#2D5A45]">
+          <div className="mx-auto grid size-14 place-items-center rounded-2xl bg-primary/10 text-primary">
             <ClipboardCheck className="size-7" aria-hidden="true" />
           </div>
           <h2 className="mt-5 text-xl font-semibold tracking-tight">Görüşme analiz edildiğinde not taslağı burada açılır</h2>
-          <p className="mt-3 text-sm leading-6 text-[#6F7470]">
+          <p className="mt-3 text-sm leading-6 text-muted-foreground">
             Şikayet, anamnez, bulgu, değerlendirme ve tedavi planı tek doküman olarak hazırlanır.
           </p>
         </div>
@@ -951,13 +1611,13 @@ function EmptyClinicalNote() {
 
 function EmptyCodesCard() {
   return (
-    <Card className="overflow-hidden border-[#DDE3E0] bg-white shadow-sm">
-      <CardHeader className="border-b border-[#DDE3E0] px-5 py-4">
+    <Card className="overflow-hidden border-border bg-card shadow-card">
+      <CardHeader className="border-b border-border px-5 py-4">
         <CardTitle className="text-base font-semibold tracking-tight">Kod Önerileri</CardTitle>
-        <p className="mt-1 text-xs font-medium text-[#6F7470]">Kapalı kod veritabanı</p>
+        <p className="mt-1 text-xs font-medium text-muted-foreground">Kapalı kod veritabanı</p>
       </CardHeader>
       <CardContent className="p-5">
-        <p className="rounded-2xl border border-dashed border-[#DDE3E0] bg-[#F8F9F7] px-4 py-4 text-sm leading-6 text-[#6F7470]">
+        <p className="rounded-2xl border border-dashed border-border bg-background px-4 py-4 text-sm leading-6 text-muted-foreground">
           Analiz tamamlandığında aday kodlar ve checklist burada görünür. Kod uydurulmaz.
         </p>
       </CardContent>
@@ -967,15 +1627,15 @@ function EmptyCodesCard() {
 
 function SafetyCard() {
   return (
-    <Card className="border-[#DDE3E0] bg-[#F8F9F7] shadow-sm">
+    <Card className="border-border bg-background shadow-card">
       <CardContent className="p-5">
         <div className="flex items-start gap-3">
-          <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-[#4A7C63]/12 text-[#2D5A45]">
+          <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/12 text-primary">
             <ShieldCheck className="size-4" aria-hidden="true" />
           </div>
           <div>
-            <p className="text-sm font-semibold text-[#202422]">Klinik güvenlik</p>
-            <p className="mt-1 text-sm leading-6 text-[#6F7470]">
+            <p className="text-sm font-semibold text-foreground">Klinik güvenlik</p>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
               Tüm çıktılar hekim onayına kadar taslaktır. Onay verilmeden export oluşturulmaz.
             </p>
           </div>

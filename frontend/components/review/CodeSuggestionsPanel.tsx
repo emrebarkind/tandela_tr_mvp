@@ -50,10 +50,10 @@ export function CodeSuggestionsPanel({ procedures, selectedCode, onSelectedCodeC
   );
 
   return (
-    <Card className="overflow-hidden border-[#DDE3E0] bg-white shadow-sm">
-      <CardHeader className="border-b border-[#DDE3E0] px-5 py-4">
-        <CardTitle className="text-base font-semibold tracking-tight text-[#202422]">Kod Önerileri</CardTitle>
-        <p className="mt-1 text-xs font-medium text-[#6F7470]">Kapalı kod veritabanı adayları</p>
+    <Card className="overflow-hidden border-border bg-card shadow-card">
+      <CardHeader className="border-b border-border px-5 py-4">
+        <CardTitle className="text-base font-semibold tracking-tight text-foreground">Kod Önerileri</CardTitle>
+        <p className="mt-1 text-xs font-medium text-muted-foreground">Kapalı kod veritabanı adayları</p>
       </CardHeader>
       <CardContent className="space-y-3 p-5">
         {rows.map((row) => (
@@ -61,26 +61,26 @@ export function CodeSuggestionsPanel({ procedures, selectedCode, onSelectedCodeC
             key={row.key}
             className={`w-full rounded-xl border p-4 text-left transition ${
               selectedCode === row.code
-                ? "border-[#4A7C63] bg-[#4A7C63]/8"
-                : "border-[#DDE3E0] bg-white hover:border-[#4A7C63]/45"
+                ? "border-ring bg-primary/8"
+                : "border-border bg-card hover:border-ring/45"
             }`}
             type="button"
             onClick={() => onSelectedCodeChange(row.code)}
           >
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="font-semibold text-[#202422]">{row.code}</p>
-                <p className="mt-1 text-sm leading-6 text-[#6F7470]">{row.title}</p>
+                <p className="font-semibold text-foreground">{row.code}</p>
+                <p className="mt-1 text-sm leading-6 text-muted-foreground">{row.title}</p>
               </div>
               <MatchStateBadge state={row.matchState} />
             </div>
-            <p className="mt-3 text-xs font-semibold uppercase tracking-[0.14em] text-[#6F7470]">
+            <p className="mt-3 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
               {row.category} · FDI {row.tooth ?? "Belirsiz"}
             </p>
           </button>
         ))}
         {!selectedCode && rows[0]?.code ? (
-          <Button className="h-11 w-full rounded-lg bg-[#2D5A45] text-white hover:bg-[#244A39]" type="button" onClick={() => onSelectedCodeChange(rows[0].code)}>
+          <Button className="h-11 w-full rounded-lg bg-primary text-primary-foreground hover:bg-primary/80" type="button" onClick={() => onSelectedCodeChange(rows[0].code)}>
             İlk kodu seç
           </Button>
         ) : null}
@@ -104,9 +104,9 @@ function matchStateLabel(state: string) {
 }
 
 function matchStateClassName(state: string) {
-  if (state === "confirmed_by_documentation") return "bg-[#4A7C63]/15 text-[#2D5A45]";
-  if (state === "insufficient_documentation" || state === "needs_review") return "bg-[#E49545]/15 text-[#7A6221]";
-  if (state === "ambiguous_multiple_candidates") return "bg-[#5A96C8]/15 text-[#315F80]";
-  if (state === "no_match") return "bg-[#D8DDE5] text-[#59616B]";
-  return "bg-[#E49545]/15 text-[#7A6221]";
+  if (state === "confirmed_by_documentation") return "bg-primary/15 text-primary";
+  if (state === "insufficient_documentation" || state === "needs_review") return "bg-secondary text-foreground";
+  if (state === "ambiguous_multiple_candidates") return "bg-secondary text-foreground";
+  if (state === "no_match") return "bg-muted text-muted-foreground";
+  return "bg-secondary text-foreground";
 }

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 # Yeni, önerilen SDK: `pip install google-genai` (eski google-generativeai DEĞİL).
 from google import genai
@@ -129,6 +129,32 @@ class GeminiLLMProvider(LLMProvider):
 
         text = response.text or ""
         return _strip_json_fences(text)
+
+    def complete_structured(
+        self, system_prompt: str, user_input: str, response_json_schema: dict[str, Any]
+    ) -> str:
+        """Call Gemini with server-side JSON schema enforcement."""
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.0,
+            response_mime_type="application/json",
+            response_json_schema=response_json_schema,
+            max_output_tokens=8192,
+        )
+        try:
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=user_input,
+                config=config,
+            )
+        except Exception as exc:
+            logger.error(
+                "gemini_structured_api_error: model=%s error_type=%s",
+                self._model,
+                type(exc).__name__,
+            )
+            raise
+        return _strip_json_fences(response.text or "")
 
 
 def _strip_json_fences(text: str) -> str:

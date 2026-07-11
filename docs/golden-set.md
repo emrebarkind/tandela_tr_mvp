@@ -379,3 +379,145 @@ A: Sol üst yedi numara için kanal tedavisi planlandı, bugün geçici dolgu ya
 > §4.7 (sayısal confidence yok) — bunlar code-matching aşamasının testleri;
 > facts/note seti bağlanıp geçtikten sonra ayrı bir code-matching golden set'i
 > kurarız.
+
+---
+
+# Perio izole prompt senaryoları
+
+Bu iki senaryo yalnızca tek-diş periodontal ölçüm extraction prompt'unu sınar.
+Mobility ve furcation bu setin kapsamı dışındadır. Attachment level modelden
+istenmez; backend tarafından deterministik hesaplanır.
+
+## Perio Senaryo A — Net bukkal sıra
+
+### Transkript
+
+```
+16 bukkal üç dört dört, kanama yok, plak var.
+```
+
+### Beklenen
+
+- Standart bukkal üçlü sıra `MB → B → DB` olarak açıkça uygulanır.
+- `MB=3`, `B=4`, `DB=4`.
+- Bu üç sitede `bleeding_on_probing=false`, `plaque=true` ve
+  `is_uncertain=false`.
+- `ML`, `L`, `DL` için söylenmeyen ölçüm alanları `null` kalır.
+- Her kaydın `source_quote` alanı transkriptle birebir aynıdır.
+- `attachment_level_mm`, mobility veya furcation üretilmez.
+
+## Perio Senaryo B — Belirsiz sıra ve yaklaşık değer
+
+### Transkript
+
+```
+16'da birkaç yerde dört beş civarı var, tam emin değilim.
+```
+
+### Beklenen
+
+- Altı site kaydı tutulabilir; bütün sayısal ölçüm alanları `null` ve
+  `is_uncertain=true` olur.
+- `uncertain_items` içinde `16 numara için site sırası/değerleri net değil`
+  anlamını taşıyan bir not bulunur.
+- `4` veya `5` hiçbir siteye atanmaz; hiçbir sayı uydurulmaz.
+- Her kaydın `source_quote` alanı transkriptle birebir aynıdır.
+
+## Perio Senaryo C — Net çoklu diş ve geçiş ifadesi
+
+### Transkript
+
+```
+16 bukkal üç dört dört, kanama yok, plak var. 17'ye geçiyorum, bukkal iki üç iki, kanama var, plak yok.
+```
+
+### Beklenen
+
+- 16 ve 17 ayrı segmentlere ayrılır; her diş için altı site kaydı bulunur.
+- 16 için `MB=3`, `B=4`, `DB=4`, kanama `false`, plak `true`.
+- 17 için `MB=2`, `B=3`, `DB=2`, kanama `true`, plak `false`.
+- İki dişin ölçümleri `is_uncertain=false` olur; söylenmeyen lingual siteler
+  `null` kalır.
+- 16 kayıtlarının source_quote'u yalnız ilk cümle, 17 kayıtlarının source_quote'u
+  yalnız ikinci cümledir; provenance karışmaz.
+
+## Perio Senaryo D — Diş kimliği tamamen belirsiz
+
+### Transkript
+
+```
+Üç dört dört, kanama yok. Sonra iki üç iki, kanama var.
+```
+
+### Beklenen
+
+- Doğrulanmış FDI olmadığı için `PerioMeasurement` üretilmez.
+- İki cümle ayrı `unassigned_segments` olarak, exact source_quote ve
+  `is_uncertain=true` ile korunur.
+- `uncertain_items`, her segmentin hangi dişe ait olduğunun belirtilmediğini
+  açıklar.
+- Hiçbir `tooth_number_fdi` üretilmez; özellikle önceki/sonraki diş tahmini
+  yapılmaz.
+
+## Perio Senaryo E — Bir net, bir belirsiz segment
+
+### Transkript
+
+```
+16 bukkal üç dört dört, kanama yok. Sonra iki üç iki, kanama var.
+```
+
+### Beklenen
+
+- İlk cümleden yalnız 16 için altı kayıt üretilir: `MB=3`, `B=4`, `DB=4`,
+  kanama `false`, `is_uncertain=false`.
+- İkinci cümle 16'nın devamı veya 17 olarak varsayılmaz; exact quote ile
+  `unassigned_segments` içine `is_uncertain=true` olarak alınır.
+- `uncertain_items`, ikinci grubun hangi dişe ait olduğunun net olmadığını
+  açıklar.
+
+## Perio Diş Özeti Senaryo F — Net mobilite ve furkasyon
+
+### Transkript
+
+```
+16 mobilite bir, furkasyon iki bukkal.
+```
+
+### Beklenen
+
+- 16 numaralı diş için `mobility_grade=1`, `furcation_grade=2` ve
+  `furcation_site=buccal` çıkarılır.
+- Kayıt `is_uncertain=false` olur ve `uncertain_items` boş kalır.
+- `source_quote` transkriptle birebir aynıdır.
+
+## Perio Diş Özeti Senaryo G — Belirsiz mobilite
+
+### Transkript
+
+```
+16 biraz oynuyor gibi.
+```
+
+### Beklenen
+
+- Açık bir Miller derecesi söylenmediği için `mobility_grade=null` kalır.
+- Kayıt `is_uncertain=true` olur; `uncertain_items` mobilite derecesinin net
+  olmadığını belirtir.
+- Hareketlilik derecesi tahmin edilmez ve `source_quote` birebir korunur.
+
+## Perio Diş Özeti Senaryo H — Furkasyon için geçersiz diş tipi
+
+### Transkript
+
+```
+11 furkasyon bir.
+```
+
+### Beklenen
+
+- 11 anterior diş olduğundan furkasyon kabul edilmez;
+  `furcation_grade=null` ve `furcation_site=null` kalır.
+- Kayıt `is_uncertain=true` olur; `uncertain_items` içinde
+  `furkasyon bu diş tipinde geçerli değil` anlamında bir not bulunur.
+- Model açıkça söylenen dereceyi dahi kaydetmez; `source_quote` birebir korunur.

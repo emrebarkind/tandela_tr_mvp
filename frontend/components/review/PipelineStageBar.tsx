@@ -66,10 +66,10 @@ export function PipelineStageBar({ stages, activeStageId, onSelectStage }: Pipel
               disabled={stage.disabled}
               onClick={() => onSelectStage(stage.id)}
               className={cn(
-                "flex min-w-[150px] items-center gap-2 rounded-xl border bg-card px-3 py-2 text-left shadow-sm transition",
-                stage.id === activeStageId && "border-[#4A7C63] ring-2 ring-[#4A7C63]/15",
+                "flex min-w-[150px] items-center gap-2 rounded-xl border bg-card px-3 py-2 text-left shadow-card transition",
+                stage.id === activeStageId && "border-ring ring-2 ring-ring/15",
                 stage.disabled && "cursor-not-allowed opacity-45",
-                !stage.disabled && "hover:border-[#4A7C63]/60",
+                !stage.disabled && "hover:border-ring/60",
               )}
             >
               <StageIcon state={stage.state} />
@@ -94,10 +94,10 @@ export function PipelineStageBar({ stages, activeStageId, onSelectStage }: Pipel
 
 function StageIcon({ state }: { state: PipelineStageState }) {
   if (state === "done") {
-    return <Check className="size-4 shrink-0 text-[#4A7C63]" />;
+    return <Check className="size-4 shrink-0 text-primary" />;
   }
   if (state === "current") {
-    return <Dot className="size-5 shrink-0 text-[#2D5A45]" />;
+    return <Dot className="size-5 shrink-0 text-primary" />;
   }
   if (state === "blocked") {
     return <Circle className="size-4 shrink-0 fill-amber-400 text-amber-500" />;

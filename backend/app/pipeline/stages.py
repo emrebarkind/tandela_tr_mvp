@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Optional
 
 from app.pipeline.types import (
@@ -49,6 +50,11 @@ from app.pipeline.types import (
     ProcedureStatus,
     SurfaceCount,
     ToothSurface,
+    ToothPerioSummary,
+    PerioMeasurement,
+    PerioSite,
+    ToothType,
+    Dentition,
     TreatmentKind,
     CanalCount,
     CodeSuggestionBundle,
@@ -66,6 +72,96 @@ ROLE_ASSIGNMENT_PROMPT_FILE = "role_assignment.md"
 CLINICAL_FACTS_PROMPT_FILE = "clinical_facts_extraction.md"
 CLINICAL_NOTE_PROMPT_FILE = "clinical_note_generation.md"
 DENTAL_CHART_PROMPT_FILE = "dental_chart_extraction.md"
+PERIO_TOOTH_SUMMARY_PROMPT_FILE = "perio_tooth_summary_extraction.md"
+PERIO_MULTI_TOOTH_PROMPT_FILE = "perio_multi_tooth_extraction.md"
+
+PERIO_TOOTH_SUMMARY_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summaries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tooth_number_fdi": {"type": "integer"},
+                    "mobility_grade": {"type": ["integer", "null"]},
+                    "furcation_grade": {"type": ["integer", "null"]},
+                    "furcation_site": {
+                        "type": ["string", "null"],
+                        "enum": ["buccal", "lingual", "palatal", "mesial", "distal", None],
+                    },
+                    "source_quote": {"type": "string"},
+                    "is_uncertain": {"type": "boolean"},
+                },
+                "required": [
+                    "tooth_number_fdi",
+                    "mobility_grade",
+                    "furcation_grade",
+                    "furcation_site",
+                    "source_quote",
+                    "is_uncertain",
+                ],
+            },
+        },
+        "uncertain_items": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["summaries", "uncertain_items"],
+}
+
+PERIO_SITE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tooth_segments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tooth_number_fdi": {"type": "integer"},
+                    "source_quote": {"type": "string"},
+                    "is_uncertain": {"type": "boolean"},
+                    "sites": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "site": {
+                                    "type": "string",
+                                    "enum": ["MB", "B", "DB", "ML", "L", "DL"],
+                                },
+                                "pocket_depth_mm": {"type": "integer"},
+                                "gingival_margin_mm": {"type": "integer"},
+                                "bleeding_on_probing": {"type": "boolean"},
+                                "plaque": {"type": "boolean"},
+                                "recession_mm": {"type": "integer"},
+                                "is_uncertain": {"type": "boolean"},
+                            },
+                            "required": ["site"],
+                        },
+                    },
+                },
+                "required": [
+                    "tooth_number_fdi",
+                    "source_quote",
+                    "is_uncertain",
+                    "sites",
+                ],
+            },
+        },
+        "unassigned_segments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source_quote": {"type": "string"},
+                    "is_uncertain": {"type": "boolean"},
+                },
+                "required": ["source_quote", "is_uncertain"],
+            },
+        },
+        "uncertain_items": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["tooth_segments", "unassigned_segments", "uncertain_items"],
+}
 
 # Fact kategorisi → ClinicalNoteDraft bölümü. 1:1 eşleşme; FactCategory'de
 # bölümsüz kategori yoktur, ClinicalNoteDraft'ta kategorisiz bölüm yoktur.
@@ -420,7 +516,7 @@ def extract_clinical_facts(transcript: RoleLabelledTranscript, llm: LLMProvider)
             "clinical_facts_llm_output_unparseable: session_id=%s — fail-safe'e düşülüyor.",
             transcript.session_id,
         )
-        return _fail_safe_clinical_facts(transcript.session_id)
+        return _fallback_clinical_facts_from_transcript(transcript)
 
     return _enforce_source_role_invariant(facts)
 
@@ -596,6 +692,178 @@ def _fail_safe_clinical_facts(session_id: str) -> ClinicalFactsBundle:
     )
 
 
+def _fallback_clinical_facts_from_transcript(transcript: RoleLabelledTranscript) -> ClinicalFactsBundle:
+    """Parse fail durumunda güvenli, kanıtlı minimum fact çıkarımı.
+
+    Bu fallback klinik içerik tahmini yapmaz: yalnızca tek utterance içinde açıkça
+    görünen hasta şikayeti veya hekim kaynaklı FDI/procedure ifadelerini taşır.
+    Her `source_quote` utterance metninin birebir kendisidir; böylece provenance
+    bozulmaz. Dentist-only kategoriler için hasta/asistan cümlesi kullanılmaz.
+    """
+    facts: list[ClinicalFact] = []
+    for utterance in transcript.utterances:
+        text = utterance.text.strip()
+        if not text:
+            continue
+        normalized = _normalize_lookup_text(text)
+
+        if utterance.role == DentistRole.PATIENT and _looks_like_patient_complaint(normalized):
+            facts.append(
+                ClinicalFact(
+                    category=FactCategory.PATIENT_COMPLAINT,
+                    text=text,
+                    source_quote=text,
+                    source_role=DentistRole.PATIENT,
+                    source_speaker=utterance.speaker_id,
+                    tooth_number_fdi=None,
+                    status=None,
+                    is_uncertain=False,
+                )
+            )
+            continue
+
+        if utterance.role != DentistRole.DENTIST:
+            continue
+
+        tooth_number_fdi = _extract_explicit_fdi_from_text(normalized)
+        has_procedure = _fallback_detects_procedure(normalized)
+        has_finding = _fallback_detects_finding(normalized)
+        has_assessment = _fallback_detects_assessment(normalized)
+        has_plan = _fallback_detects_plan(normalized)
+
+        if has_finding:
+            facts.append(
+                ClinicalFact(
+                    category=FactCategory.CLINICAL_FINDINGS,
+                    text=text,
+                    source_quote=text,
+                    source_role=DentistRole.DENTIST,
+                    source_speaker=utterance.speaker_id,
+                    tooth_number_fdi=tooth_number_fdi,
+                    status=None,
+                    is_uncertain=_has_uncertain_language(normalized),
+                )
+            )
+        if has_assessment:
+            facts.append(
+                ClinicalFact(
+                    category=FactCategory.ASSESSMENT,
+                    text=text,
+                    source_quote=text,
+                    source_role=DentistRole.DENTIST,
+                    source_speaker=utterance.speaker_id,
+                    tooth_number_fdi=tooth_number_fdi,
+                    status=None,
+                    is_uncertain=True,
+                )
+            )
+        if has_plan:
+            facts.append(
+                ClinicalFact(
+                    category=FactCategory.TREATMENT_PLAN,
+                    text=text,
+                    source_quote=text,
+                    source_role=DentistRole.DENTIST,
+                    source_speaker=utterance.speaker_id,
+                    tooth_number_fdi=tooth_number_fdi,
+                    status=None,
+                    is_uncertain=_has_uncertain_language(normalized),
+                )
+            )
+        if has_procedure and not _is_negated_procedure_text(normalized):
+            facts.append(
+                ClinicalFact(
+                    category=FactCategory.PROCEDURES,
+                    text=text,
+                    source_quote=text,
+                    source_role=DentistRole.DENTIST,
+                    source_speaker=utterance.speaker_id,
+                    tooth_number_fdi=tooth_number_fdi,
+                    status=_fallback_procedure_status(normalized),
+                    is_uncertain=_has_uncertain_language(normalized),
+                )
+            )
+
+    return _enforce_source_role_invariant(
+        ClinicalFactsBundle(
+            session_id=transcript.session_id,
+            facts=facts,
+            uncertain_items=[
+                "Clinical facts extraction çıktısı parse edilemedi; güvenli minimum fallback ile yalnızca açık kaynaklı ifadeler taşındı."
+            ],
+        )
+    )
+
+
+def _looks_like_patient_complaint(text: str) -> bool:
+    return _has_any(text, ("ağrı", "agri", "hassasiyet", "zonkl", "şikayet", "sikayet", "iltihaplı mı", "iltihapli mi"))
+
+
+def _fallback_detects_finding(text: str) -> bool:
+    return _has_any(text, ("görüyorum", "goruyorum", "var", "röntgen", "rontgen", "perküsyon", "perkusyon", "periapikal", "çürük", "curuk"))
+
+
+def _fallback_detects_assessment(text: str) -> bool:
+    return _has_any(text, ("gerekebilir", "şüpheli", "supheli", "değerlendireceğiz", "degerlendirecegiz", "kesin olarak söylemek zor", "olabilir"))
+
+
+def _fallback_detects_plan(text: str) -> bool:
+    return _has_any(text, ("plan", "yapalım", "yapalim", "başlarız", "baslariz", "ilerleyeceğiz", "ilerleyecegiz", "deneyelim"))
+
+
+def _fallback_detects_procedure(text: str) -> bool:
+    return _has_any(text, ("kanal tedavisi", "endodontik", "dolgu", "restorasyon", "kompozit", "çekim", "cekim"))
+
+
+def _has_uncertain_language(text: str) -> bool:
+    return _has_any(text, ("gerekebilir", "şüpheli", "supheli", "olabilir", "değerlendireceğiz", "degerlendirecegiz", "kesin olarak söylemek zor"))
+
+
+def _fallback_procedure_status(text: str) -> ProcedureStatus:
+    if _has_any(text, ("yapıldı", "yapildi", "tamamlandı", "tamamlandi")):
+        return ProcedureStatus.PERFORMED
+    if _has_any(text, ("planlandı", "planlandi", "planlayalım", "planlayalim", "yapılacak", "yapilacak", "başlarız", "baslariz", "yapalım", "yapalim")):
+        return ProcedureStatus.PLANNED
+    if _has_uncertain_language(text):
+        return ProcedureStatus.DISCUSSED
+    return ProcedureStatus.UNCLEAR
+
+
+def _extract_explicit_fdi_from_text(text: str) -> Optional[int]:
+    digit_match = re.search(r"\b([1-8][1-8])\b", text)
+    if digit_match:
+        candidate = int(digit_match.group(1))
+        return candidate if _is_valid_fdi(candidate) else None
+
+    phrase_map: tuple[tuple[str, int], ...] = (
+        ("sağ alt altı", 46),
+        ("sag alt alti", 46),
+        ("sağ alt 6", 46),
+        ("sag alt 6", 46),
+        ("sol alt altı", 36),
+        ("sol alt alti", 36),
+        ("sağ üst altı", 16),
+        ("sag ust alti", 16),
+        ("sağ ust alti", 16),
+        ("sol üst altı", 26),
+        ("sol ust alti", 26),
+        ("kırk altı", 46),
+        ("kirk alti", 46),
+        ("kırk dört", 44),
+        ("kirk dort", 44),
+        ("otuz altı", 36),
+        ("otuz alti", 36),
+        ("yirmi altı", 26),
+        ("yirmi alti", 26),
+        ("on altı", 16),
+        ("on alti", 16),
+    )
+    for phrase, tooth_number in phrase_map:
+        if phrase in text:
+            return tooth_number
+    return None
+
+
 def generate_clinical_note(facts: ClinicalFactsBundle, llm: LLMProvider) -> ClinicalNoteDraft:
     """clinical_note_generation LLM aşaması — STUB DEĞİL.
 
@@ -625,7 +893,7 @@ def generate_clinical_note(facts: ClinicalFactsBundle, llm: LLMProvider) -> Clin
             _loads_llm_json_object(raw_output),
         )
         _validate_note_against_facts(safe_facts, note)
-        return note
+        return _attach_note_provenance_metadata(safe_facts, note)
     except Exception:
         # KVKK (CLAUDE.md §5): ham LLM çıktısı/fact metni loga YAZILMAZ
         # — yalnızca session_id.
@@ -649,6 +917,8 @@ def _deterministic_clinical_note_from_facts(facts: ClinicalFactsBundle) -> Clini
                 text=fact.text,
                 source_role=fact.source_role,
                 source_quote=fact.source_quote,
+                source_speaker=fact.source_speaker,
+                source_role_confidence=fact.source_role_confidence,
             )
         )
 
@@ -657,6 +927,36 @@ def _deterministic_clinical_note_from_facts(facts: ClinicalFactsBundle) -> Clini
         uncertain_items=list(facts.uncertain_items),
         **sections,
     )
+
+
+def _attach_note_provenance_metadata(
+    facts: ClinicalFactsBundle, note: ClinicalNoteDraft
+) -> ClinicalNoteDraft:
+    metadata_by_key = {
+        (fact.text, fact.source_role, fact.source_quote): (
+            fact.source_speaker,
+            fact.source_role_confidence,
+        )
+        for fact in facts.facts
+    }
+    updates = {}
+    for section in _CATEGORY_TO_NOTE_SECTION.values():
+        sentences = []
+        for sentence in getattr(note, section):
+            source_speaker, source_role_confidence = metadata_by_key.get(
+                (sentence.text, sentence.source_role, sentence.source_quote),
+                (sentence.source_speaker, sentence.source_role_confidence),
+            )
+            sentences.append(
+                sentence.model_copy(
+                    update={
+                        "source_speaker": source_speaker,
+                        "source_role_confidence": source_role_confidence,
+                    }
+                )
+            )
+        updates[section] = sentences
+    return note.model_copy(update=updates)
 
 
 def _build_clinical_note_user_input(facts: ClinicalFactsBundle) -> str:
@@ -844,6 +1144,178 @@ def extract_dental_chart_commands(
         enriched.append(procedure.model_copy(update=updates) if updates else procedure)
 
     return enriched
+
+
+def _enforce_perio_summary_invariant(summary: ToothPerioSummary) -> ToothPerioSummary:
+    """Deterministically reject furcation on an ineligible FDI tooth.
+
+    This guard deliberately does not trust prompt compliance. It also avoids
+    logging dictated clinical text; the FDI number is sufficient to make the
+    model-output anomaly observable.
+    """
+    dentition, tooth_type, _ = derive_fdi_classification(summary.tooth_number_fdi)
+    tooth_position = summary.tooth_number_fdi % 10
+    # Compare stable enum values rather than object identity so the invariant
+    # remains deterministic even in test/dev processes that reload modules.
+    dentition_value = getattr(dentition, "value", dentition)
+    tooth_type_value = getattr(tooth_type, "value", tooth_type)
+    is_first_permanent_premolar = (
+        dentition_value == "permanent"
+        and tooth_type_value == "premolar"
+        and tooth_position == 4
+    )
+    is_furcation_eligible = tooth_type_value == "molar" or is_first_permanent_premolar
+
+    if not is_furcation_eligible and (
+        summary.furcation_grade is not None or summary.furcation_site is not None
+    ):
+        logger.warning(
+            "perio_summary_invariant_corrected: tooth_number_fdi=%s "
+            "reason=furcation_not_valid_for_tooth_type",
+            summary.tooth_number_fdi,
+        )
+        return summary.model_copy(
+            update={"furcation_grade": None, "furcation_site": None}
+        )
+    return summary
+
+
+def extract_perio_tooth_summaries(
+    dictation: str, llm: LLMProvider
+) -> tuple[list[ToothPerioSummary], list[str]]:
+    """Extract isolated tooth-level perio summaries and enforce invariants.
+
+    This stage is intentionally not connected to the orchestrator yet. Every
+    parsed LLM item passes through `_enforce_perio_summary_invariant` before it
+    can leave this function.
+    """
+    system_prompt = load_system_prompt(PERIO_TOOTH_SUMMARY_PROMPT_FILE)
+    raw_output = llm.complete_structured(
+        system_prompt,
+        f"Dentist dictation:\n{dictation}",
+        PERIO_TOOTH_SUMMARY_RESPONSE_SCHEMA,
+    )
+    data = json.loads(raw_output)
+    if not isinstance(data, dict) or not isinstance(data.get("summaries"), list):
+        raise ValueError("perio tooth summary payload geçersiz")
+
+    uncertain_items = data.get("uncertain_items", [])
+    if not isinstance(uncertain_items, list) or not all(
+        isinstance(item, str) for item in uncertain_items
+    ):
+        raise ValueError("perio tooth summary uncertain_items geçersiz")
+
+    summaries: list[ToothPerioSummary] = []
+    allowed_sites = {"buccal", "lingual", "palatal", "mesial", "distal"}
+    for item in data["summaries"]:
+        if not isinstance(item, dict):
+            raise ValueError("perio tooth summary item dict değil")
+        tooth_number = item.get("tooth_number_fdi")
+        if not isinstance(tooth_number, int) or not is_valid_fdi_number(tooth_number):
+            raise ValueError("perio tooth summary FDI geçersiz")
+
+        mobility_grade = item.get("mobility_grade")
+        furcation_grade = item.get("furcation_grade")
+        for grade in (mobility_grade, furcation_grade):
+            if grade is not None and (not isinstance(grade, int) or not 0 <= grade <= 3):
+                raise ValueError("perio tooth summary grade geçersiz")
+
+        furcation_site = item.get("furcation_site")
+        if furcation_site is not None and furcation_site not in allowed_sites:
+            raise ValueError("perio tooth summary furcation_site geçersiz")
+
+        # model_construct preserves the raw, schema-valid LLM values so the
+        # explicit defense-in-depth guard can observe and log violations before
+        # correcting them. Grade/FDI/site validation is performed just above.
+        summary = ToothPerioSummary.model_construct(
+            tooth_number_fdi=tooth_number,
+            mobility_grade=mobility_grade,
+            furcation_grade=furcation_grade,
+            furcation_site=furcation_site,
+        )
+        summaries.append(_enforce_perio_summary_invariant(summary))
+
+    return summaries, uncertain_items
+
+
+def extract_perio_site_measurements(
+    dictation: str, llm: LLMProvider
+) -> tuple[list[PerioMeasurement], list[str]]:
+    """Extract multi-tooth six-site measurements without guessing segments."""
+    system_prompt = load_system_prompt(PERIO_MULTI_TOOTH_PROMPT_FILE)
+    raw_output = llm.complete_structured(
+        system_prompt,
+        f"Multi-tooth dentist periodontal dictation:\n{dictation}",
+        PERIO_SITE_RESPONSE_SCHEMA,
+    )
+    data = json.loads(raw_output)
+    if not isinstance(data, dict) or not isinstance(data.get("tooth_segments"), list):
+        raise ValueError("perio site measurement payload geçersiz")
+
+    uncertain_items = data.get("uncertain_items", [])
+    if not isinstance(uncertain_items, list) or not all(
+        isinstance(item, str) for item in uncertain_items
+    ):
+        raise ValueError("perio site measurement uncertain_items geçersiz")
+
+    measurements: list[PerioMeasurement] = []
+    allowed_site_values = {site.value for site in PerioSite}
+    optional_int_fields = ("pocket_depth_mm", "gingival_margin_mm", "recession_mm")
+    optional_bool_fields = ("bleeding_on_probing", "plaque")
+
+    for segment in data["tooth_segments"]:
+        if not isinstance(segment, dict):
+            raise ValueError("perio tooth segment dict değil")
+        tooth_number = segment.get("tooth_number_fdi")
+        source_quote = segment.get("source_quote")
+        segment_uncertain = segment.get("is_uncertain", False)
+        sites = segment.get("sites", [])
+        if not isinstance(tooth_number, int) or not is_valid_fdi_number(tooth_number):
+            raise ValueError("perio tooth segment FDI geçersiz")
+        if not isinstance(source_quote, str) or not source_quote:
+            raise ValueError("perio tooth segment source_quote eksik")
+        if not isinstance(segment_uncertain, bool) or not isinstance(sites, list):
+            raise ValueError("perio tooth segment alanları geçersiz")
+
+        values_by_site: dict[PerioSite, dict] = {}
+        for site_values in sites:
+            if not isinstance(site_values, dict) or site_values.get("site") not in allowed_site_values:
+                raise ValueError("perio site geçersiz")
+            site = PerioSite(site_values["site"])
+            if site in values_by_site:
+                raise ValueError("perio site tekrarlı")
+            for field in optional_int_fields:
+                value = site_values.get(field)
+                if value is not None and not isinstance(value, int):
+                    raise ValueError(f"perio {field} geçersiz")
+            depth = site_values.get("pocket_depth_mm")
+            if depth is not None and not 0 <= depth <= 15:
+                raise ValueError("perio pocket_depth_mm aralık dışında")
+            for field in optional_bool_fields:
+                value = site_values.get(field)
+                if value is not None and not isinstance(value, bool):
+                    raise ValueError(f"perio {field} geçersiz")
+            if not isinstance(site_values.get("is_uncertain", False), bool):
+                raise ValueError("perio site is_uncertain geçersiz")
+            values_by_site[site] = site_values
+
+        for site in PerioSite:
+            values = values_by_site.get(site, {})
+            measurements.append(
+                PerioMeasurement(
+                    tooth_number_fdi=tooth_number,
+                    site=site,
+                    pocket_depth_mm=values.get("pocket_depth_mm"),
+                    gingival_margin_mm=values.get("gingival_margin_mm"),
+                    bleeding_on_probing=values.get("bleeding_on_probing"),
+                    plaque=values.get("plaque"),
+                    recession_mm=values.get("recession_mm"),
+                    source_quote=source_quote,
+                    is_uncertain=segment_uncertain or values.get("is_uncertain", False),
+                )
+            )
+
+    return measurements, uncertain_items
 
 
 def _append_dental_chart_uncertainty(

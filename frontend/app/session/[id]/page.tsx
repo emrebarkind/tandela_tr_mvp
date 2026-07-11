@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { Loader2, Save, X } from "lucide-react";
+import { useHeader } from "@/components/app/HeaderContext";
 import { ApprovedExport } from "@/components/review/ApprovedExport";
 import { CodeSuggestionsPanel } from "@/components/review/CodeSuggestionsPanel";
 import { DentalChartPanel } from "@/components/review/DentalChartPanel";
 import { NoteDocument } from "@/components/review/NoteDocument";
-import { RoleGate } from "@/components/review/RoleGate";
 import { TranscriptDrawer } from "@/components/review/TranscriptDrawer";
 import { TranscriptInput } from "@/components/review/TranscriptInput";
 import { Badge } from "@/components/ui/badge";
@@ -57,6 +58,8 @@ type NoteSentence = {
   text: string;
   source_quote: string;
   source_role: Role;
+  source_speaker?: string | null;
+  source_role_confidence?: "clear" | "uncertain";
 };
 
 type ClinicalNote = {
@@ -116,6 +119,12 @@ type PipelineReviewResponse = {
   review_state: string;
   stopped_at_stage?: string | null;
   next_action: string;
+  role_review_required?: boolean;
+  uncertain_speakers?: {
+    speaker_id: string;
+    tentative_role: Role;
+    reason?: string | null;
+  }[];
   role_review?: {
     speakers: {
       speaker_id: string;
@@ -161,6 +170,8 @@ type NoteSectionLine = {
   text: string;
   source_quote?: string;
   source_role?: Role;
+  source_speaker?: string | null;
+  source_role_confidence?: "clear" | "uncertain";
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -182,6 +193,7 @@ A: 46 numara için kanal tedavisi planlandı, geçici restorasyon yapılacak.`;
 const transcriptLinePattern = /^([A-Za-zÇĞİÖŞÜçğıöşü0-9_-]+)\s*:\s*(.+)$/;
 
 export default function ReviewPage({ params }: { params: { id: string } }) {
+  const { clearHeader, setHeader } = useHeader();
   const [sessionId] = useState(params.id);
   const [patientName] = useState("Demo Danışan");
   const [encounterAt] = useState(() => toDatetimeLocalValue(new Date()));
@@ -205,8 +217,54 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   const displayedNote = editableNote ?? dentistReview?.note ?? null;
   const procedures = dentistReview?.procedures ?? [];
   const noteSections = displayedNote ? noteSectionsFromBackend(displayedNote) : [];
-  const needsRoleReview = response?.next_action === "review_speaker_roles";
-  const hasAnalysisDraft = response?.next_action === "review_note_and_codes" && Boolean(displayedNote);
+  const needsRoleReview = Boolean(response?.role_review_required);
+  const hasAnalysisDraft = Boolean(displayedNote) && (response?.next_action === "review_note_and_codes" || response?.role_review_required);
+
+  useEffect(() => {
+    if (!hasAnalysisDraft || !displayedNote || approved) {
+      clearHeader();
+      return;
+    }
+
+    setHeader({
+      title: patientName.trim() || "Yeni Görüşme",
+      subtitle: formatEncounterDate(encounterAt),
+      badge: (
+        <Badge className="rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-foreground hover:bg-secondary">
+          Taslak · Hekim onayı gereklidir
+        </Badge>
+      ),
+      actions: (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            className="h-10 rounded-lg px-4 text-muted-foreground hover:bg-muted"
+            onClick={() => {
+              setResponse(null);
+              setEditableNote(null);
+              setApproved(false);
+              setExportPayload(null);
+            }}
+          >
+            <X className="mr-2 size-4" />
+            Vazgeç
+          </Button>
+          <Button
+            type="button"
+            className="h-10 rounded-lg bg-primary px-5 font-semibold text-primary-foreground hover:bg-primary/80"
+            onClick={() => void approveClinicalReview()}
+            disabled={isLoading || !displayedNote}
+          >
+            {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
+            İncele ve Onayla
+          </Button>
+        </div>
+      ),
+    });
+
+    return () => clearHeader();
+  }, [approved, clearHeader, displayedNote, encounterAt, hasAnalysisDraft, isLoading, patientName, setHeader]);
 
   async function runTranscriptAnalysis(sourceUtterances: TranscriptUtterance[]) {
     return postReviewResponse("/sessions", {
@@ -236,36 +294,21 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     }
   }
 
-  async function approveRolesAndResume() {
-    if (!needsRoleReview) {
-      setError("Devam etmek için önce rol onayı gerektiren bir analiz sonucu olmalı.");
-      return;
-    }
-    if (!canAnalyzeTranscript) {
-      setError("Rol onayı öncesi transkript satırlarını düzeltin.");
-      return;
-    }
+  async function patchSpeakerRole(speakerId: string, role: Role) {
+    if (!response?.session_id) return;
     setIsLoading(true);
     setError(null);
     setApproved(false);
     setExportPayload(null);
     try {
       const activeSessionId = response?.session_id ?? sessionId;
-      const result = await postReviewResponse(`/sessions/${encodeURIComponent(activeSessionId)}/resume-role-review`, {
-        utterances,
-        corrected_roles: speakers.map((speaker) => ({
-          speaker_id: speaker.id,
-          role: speaker.role,
-          status: "clear",
-          reason: "Frontend review: hekim rolü onayladı.",
-        })),
+      const result = await patchReviewResponse(`/sessions/${encodeURIComponent(activeSessionId)}/speaker-role`, {
+        speaker_id: speakerId,
+        role,
+        reason: "Frontend inline rol düzeltmesi.",
       });
       setSpeakers((current) =>
-        current.map((speaker) => ({
-          ...speaker,
-          status: "clear",
-          reason: speaker.reason ?? "Frontend review: hekim rolü onayladı.",
-        })),
+        current.map((speaker) => (speaker.id === speakerId ? { ...speaker, role, status: "clear" } : speaker)),
       );
       applyBackendResponse(result);
     } catch (caught) {
@@ -309,7 +352,9 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
 
   function applyBackendResponse(result: PipelineReviewResponse, sourceUtterances: TranscriptUtterance[] = utterances) {
     setResponse(result);
-    setEditableNote(result.dentist_review?.note ?? null);
+    if (result.dentist_review?.note) {
+      setEditableNote(result.dentist_review.note);
+    }
     setExportMessage(null);
     if (result.role_review) {
       setSpeakers(
@@ -380,36 +425,20 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     );
   }
 
-  if (needsRoleReview) {
-    return (
-      <RoleGate
-        speakers={speakers}
-        isLoading={isLoading}
-        canApprove={canAnalyzeTranscript}
-        onRoleChange={updateSpeakerRole}
-        onApprove={() => void approveRolesAndResume()}
-      />
-    );
-  }
-
   if (hasAnalysisDraft && displayedNote) {
     return (
       <main className="bg-background p-4 md:p-6">
         <div className="mx-auto max-w-7xl space-y-5">
-          <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border bg-card p-4">
-            <div>
-              <p className="text-sm font-medium text-muted-foreground">{patientName.trim() || "İsimsiz danışan"}</p>
-              <h2 className="mt-1 text-xl font-semibold tracking-tight">{formatEncounterDate(encounterAt)}</h2>
+          {needsRoleReview ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="font-semibold">Konuşmacı rolleri kesin değil — kontrol edin</p>
+                <Badge className="rounded-full bg-amber-100 text-amber-900 hover:bg-amber-100">
+                  {response?.uncertain_speakers?.length ?? speakers.filter((speaker) => speaker.status !== "clear").length} konuşmacı belirsiz
+                </Badge>
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <Badge className="rounded-lg bg-amber-100 px-3 py-1.5 text-sm font-semibold text-amber-900 hover:bg-amber-100">
-                Taslak · Hekim onayı gereklidir
-              </Badge>
-              <Button type="button" onClick={() => void approveClinicalReview()} disabled={isLoading || !hasAnalysisDraft}>
-                İncele ve Onayla
-              </Button>
-            </div>
-          </div>
+          ) : null}
 
           <Tabs value={activeWorkspaceTab} onValueChange={setActiveWorkspaceTab} className="gap-4">
             <TabsList className="w-full justify-start overflow-x-auto">
@@ -424,6 +453,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
                 sections={noteSections}
                 uncertainItems={dentistReview?.uncertain_items ?? []}
                 onSentenceChange={updateNoteSentence}
+                onSourceRoleChange={(speakerId, role) => void patchSpeakerRole(speakerId, role)}
               />
             </TabsContent>
             {hasDentalChart ? (
@@ -487,6 +517,19 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
 async function postReviewResponse(path: string, body: unknown): Promise<PipelineReviewResponse> {
   const response = await fetch(`${API_BASE}${path}`, {
     method: "POST",
+    headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return response.json() as Promise<PipelineReviewResponse>;
+}
+
+async function patchReviewResponse(path: string, body: unknown): Promise<PipelineReviewResponse> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
     headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -581,6 +624,8 @@ function noteLineFromSentence(sentence: NoteSentence): NoteSectionLine {
     text: sentence.text,
     source_quote: sentence.source_quote,
     source_role: sentence.source_role,
+    source_speaker: sentence.source_speaker,
+    source_role_confidence: sentence.source_role_confidence,
   };
 }
 

@@ -52,8 +52,11 @@ Audio capture → audio preprocessing → ASR (+word timestamps) → diarization
   WebSocket proxy üzerinden), ANALİZ yine batch çalışır — kayıt bitince pipeline
   tetiklenir.
 - **REVIEW GATE:** rol ataması `unresolved`/`unknown`/`review_needed` ya da
-  `manual_review_required=true` ise pipeline **durur**; not üretmeden önce hekimden
-  rol düzeltmesi ister. Bu kod seviyesinde orchestration kuralıdır (bkz. §4.8).
+  `manual_review_required=true` ise pipeline **taslak üretimini durdurmaz**;
+  tentative rollerle not/chart/kod taslağı üretir ve UI'da rol kontrol banner'ı
+  gösterir. Hekim rolleri düzeltirse facts/note/procedure yeniden üretilir.
+  Bu akış §4.2'yi gevşetmez: hasta olabilecek ifade dentist-only bulgu/plan/
+  prosedüre sızamaz; belirsizlik provenance ve role_review metadata'sında kalır.
 
 ### Beyin (LLM katmanı)
 Üç aşama, prompt dosyaları `backend/app/prompts/`:
@@ -93,9 +96,10 @@ uydurmaz) → hekim seçer.
    ambiguous_multiple_candidates/no_match` (kod).
 8. **Tek-ifadeli konuşmacı `clear` olamaz.** Az utterance → en fazla
    `review_needed`. Konuşmacı sayısı 2–3 toleranslı.
-   - `review_needed` bir konuşmacı da REVIEW GATE'i bloke eder (unresolved/unknown
-     gibi). `review_needed` belirsizliktir; §4.1 gereği belirsizse durup hekime
-     sorulur, tahmin edilmez.
+   - `review_needed` bir konuşmacı UI'da rol kontrol banner'ı üretir, fakat taslak
+     üretimini bloke etmez. Sistem tentative rol ile çalışır; hekim sonradan
+     rolü düzeltebilir ve çıktı yeniden üretilir. Hasta olabilecek ifade
+     dentist-only kategorilere giremez (§4.2).
 9. **FDI doğrula.** Diş no normalize edilir ("sağ alt altı"→46) ve geçerli
    aralıkta mı (11–48, geçerli çeyrek) kontrol edilir. Mırıltıdan numara üretilmez.
 10. **Her şey taslaktır.** Hiçbir not/kod hekim onayı olmadan klinik geçerli

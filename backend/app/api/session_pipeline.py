@@ -7,9 +7,12 @@ transkript üzerinden aynı klinik pipeline kapılarını çalıştırır.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
-from uuid import uuid4
+import logging
+import time
 from typing import Optional
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -22,11 +25,15 @@ from app.pipeline.types import (
     CodeMatchState,
     CodeMatchResult,
     CodeSuggestionBundle,
+    DentalCondition,
+    derive_fdi_classification,
     DentistRole,
     DentistReviewDecision,
+    is_valid_fdi_number,
     PipelineResult,
     PipelineStatus,
     ProcedureObject,
+    ProcedureStatus,
     RoleAssignmentResult,
     RoleStatus,
     SpeakerLabelledTranscript,
@@ -34,6 +41,9 @@ from app.pipeline.types import (
     Utterance,
 )
 from app.providers.llm import LLMProvider
+
+
+logger = logging.getLogger(__name__)
 
 
 class TranscriptUtteranceIn(BaseModel):
@@ -66,6 +76,18 @@ class ResumeRoleReviewRequest(BaseModel):
     utterances: list[TranscriptUtteranceIn] = Field(default_factory=list)
 
 
+class SpeakerRolePatchRequest(BaseModel):
+    speaker_id: str
+    role: DentistRole
+    reason: Optional[str] = None
+
+
+class ManualFindingRequest(BaseModel):
+    tooth_number_fdi: int
+    condition: DentalCondition
+    note: Optional[str] = None
+
+
 class ApproveReviewRequest(BaseModel):
     session_id: Optional[str] = None
     selected_codes: list[str] = Field(default_factory=list)
@@ -88,6 +110,12 @@ class RoleReviewSpeakerOut(BaseModel):
     status: RoleStatus
     review_state: RoleStatus
     utterance_count: int
+    reason: Optional[str] = None
+
+
+class UncertainSpeakerOut(BaseModel):
+    speaker_id: str
+    tentative_role: DentistRole
     reason: Optional[str] = None
 
 
@@ -144,6 +172,8 @@ class PipelineReviewResponse(BaseModel):
     review_state: str
     stopped_at_stage: Optional[str] = None
     next_action: str
+    role_review_required: bool = False
+    uncertain_speakers: list[UncertainSpeakerOut] = Field(default_factory=list)
     role_review: Optional[RoleReviewOut] = None
     dentist_review: Optional[DentistReviewOut] = None
     export_payload: Optional[ExportPayloadOut] = None
@@ -157,7 +187,7 @@ def analyze_transcript(
     request: TranscriptAnalyzeRequest,
     llm_provider: LLMProvider,
 ) -> PipelineResult:
-    """Role assignment'tan başlar; REVIEW GATE bloke ederse facts üretmez."""
+    """Role assignment'tan başlar; belirsiz rolleri draft metadata'sı olarak taşır."""
     speaker_labelled = _build_speaker_labelled_transcript(request)
     result = PipelineResult(
         session_id=request.session_id,
@@ -165,15 +195,20 @@ def analyze_transcript(
         speaker_labelled_transcript=speaker_labelled,
     )
 
-    role_assignment = stages.assign_roles(speaker_labelled, llm_provider)
+    role_assignment = _time_pipeline_stage(
+        "assign_roles",
+        result.session_id,
+        lambda: stages.assign_roles(speaker_labelled, llm_provider),
+    )
     result.role_assignment = role_assignment
 
-    if _review_gate_blocks(role_assignment):
-        result.status = PipelineStatus.NEEDS_DENTIST_ROLE_REVIEW
-        result.stopped_at_stage = "role_assignment"
-        return result
-
-    return _continue_after_role_assignment(result, speaker_labelled, role_assignment, llm_provider)
+    return _continue_after_role_assignment(
+        result,
+        speaker_labelled,
+        _execution_role_assignment(role_assignment, speaker_labelled),
+        llm_provider,
+        review_role_assignment=role_assignment,
+    )
 
 
 def resume_transcript_after_role_review(
@@ -190,12 +225,13 @@ def resume_transcript_after_role_review(
         role_assignment=corrected,
     )
 
-    if _review_gate_blocks(corrected):
-        result.status = PipelineStatus.NEEDS_DENTIST_ROLE_REVIEW
-        result.stopped_at_stage = "role_assignment"
-        return result
-
-    return _continue_after_role_assignment(result, speaker_labelled, corrected, llm_provider)
+    return _continue_after_role_assignment(
+        result,
+        speaker_labelled,
+        _execution_role_assignment(corrected, speaker_labelled),
+        llm_provider,
+        review_role_assignment=corrected,
+    )
 
 
 def approve_review(request: ApproveReviewRequest) -> PipelineResult:
@@ -270,6 +306,97 @@ def resume_session_after_role_review(
     return result
 
 
+def patch_session_speaker_role(
+    session_id: str,
+    request: SpeakerRolePatchRequest,
+    llm_provider: LLMProvider,
+) -> PipelineResult:
+    existing = _SESSION_STORE.get(session_id)
+    if existing is None:
+        raise KeyError(session_id)
+    if existing.result.role_assignment is None:
+        raise ValueError("Session rol ataması içermiyor.")
+
+    speaker_ids = {utterance.speaker_id for utterance in existing.transcript.utterances}
+    if request.speaker_id not in speaker_ids:
+        raise ValueError("Konuşmacı bu session transkriptinde bulunamadı.")
+
+    corrected_roles = []
+    for assignment in existing.result.role_assignment.assignments:
+        role = request.role if assignment.speaker_id == request.speaker_id else assignment.role
+        corrected_roles.append(
+            RoleCorrectionIn(
+                speaker_id=assignment.speaker_id,
+                role=role,
+                status=RoleStatus.CLEAR,
+                reason=(
+                    request.reason
+                    if assignment.speaker_id == request.speaker_id and request.reason
+                    else "Frontend inline rol düzeltmesi."
+                ),
+            )
+        )
+
+    utterances = [
+        TranscriptUtteranceIn(
+            speaker_id=utterance.speaker_id,
+            text=utterance.text,
+            start_sec=utterance.start_sec,
+            end_sec=utterance.end_sec,
+        )
+        for utterance in existing.transcript.utterances
+    ]
+    result = resume_transcript_after_role_review(
+        TranscriptResumeAfterRoleReviewRequest(
+            session_id=session_id,
+            utterances=utterances,
+            corrected_roles=corrected_roles,
+        ),
+        llm_provider,
+    )
+    _store_session_result(session_id, result)
+    return result
+
+
+def add_manual_finding_to_session(
+    session_id: str,
+    request: ManualFindingRequest,
+) -> PipelineResult:
+    existing = _SESSION_STORE.get(session_id)
+    if existing is None:
+        raise KeyError(session_id)
+    if existing.result.status != PipelineStatus.AWAITING_DENTIST_REVIEW:
+        raise ValueError("Manuel bulgu yalnızca hekim review aşamasındaki taslağa eklenebilir.")
+    if not is_valid_fdi_number(request.tooth_number_fdi):
+        raise ValueError("FDI diş numarası geçerli değil.")
+
+    dentition, tooth_type, tooth_group = derive_fdi_classification(request.tooth_number_fdi)
+    note = request.note.strip() if request.note else ""
+    source_quote = note or "Hekim tarafından manuel eklendi"
+    procedure = ProcedureObject(
+        procedure_family=_manual_condition_family(request.condition),
+        tooth_number_fdi=request.tooth_number_fdi,
+        dentition=dentition,
+        tooth_type=tooth_type,
+        tooth_group=tooth_group,
+        condition=request.condition,
+        status=ProcedureStatus.PERFORMED,
+        source_quotes=[source_quote],
+        source_role=DentistRole.DENTIST,
+        is_manual=True,
+        manual_note=note or None,
+    )
+    result = existing.result.model_copy(
+        update={
+            "procedures": [*existing.result.procedures, procedure],
+            "status": PipelineStatus.AWAITING_DENTIST_REVIEW,
+            "stopped_at_stage": "dentist_review",
+        }
+    )
+    _store_session_result(session_id, result)
+    return result
+
+
 def approve_session_review(
     session_id: str,
     request: ApproveReviewRequest,
@@ -308,6 +435,8 @@ def to_review_response(result: PipelineResult) -> PipelineReviewResponse:
         review_state=_review_state(result.status),
         stopped_at_stage=result.stopped_at_stage,
         next_action=_next_action(result.status),
+        role_review_required=_role_review_required(result),
+        uncertain_speakers=_build_uncertain_speakers(result),
         role_review=_build_role_review(result),
         dentist_review=_build_dentist_review(result),
         export_payload=_build_export_payload(result),
@@ -338,8 +467,26 @@ def _next_action(status: PipelineStatus) -> str:
     return "wait"
 
 
+def _role_review_required(result: PipelineResult) -> bool:
+    return result.role_assignment is not None and _review_gate_blocks(result.role_assignment)
+
+
+def _build_uncertain_speakers(result: PipelineResult) -> list[UncertainSpeakerOut]:
+    if result.role_assignment is None:
+        return []
+    return [
+        UncertainSpeakerOut(
+            speaker_id=assignment.speaker_id,
+            tentative_role=assignment.role,
+            reason=assignment.reason,
+        )
+        for assignment in result.role_assignment.assignments
+        if _assignment_needs_review(assignment)
+    ]
+
+
 def _build_role_review(result: PipelineResult) -> Optional[RoleReviewOut]:
-    if result.status != PipelineStatus.NEEDS_DENTIST_ROLE_REVIEW or result.role_assignment is None:
+    if result.role_assignment is None or not _review_gate_blocks(result.role_assignment):
         return None
     return RoleReviewOut(
         speakers=[
@@ -565,20 +712,128 @@ def _review_gate_blocks(role_assignment: RoleAssignmentResult) -> bool:
     return role_assignment.manual_review_required or role_assignment.requires_role_review
 
 
+def _assignment_needs_review(assignment: SpeakerRoleAssignment) -> bool:
+    return (
+        assignment.status in (RoleStatus.UNRESOLVED, RoleStatus.REVIEW_NEEDED)
+        or assignment.role == DentistRole.UNKNOWN
+    )
+
+
+def _execution_role_assignment(
+    role_assignment: RoleAssignmentResult,
+    transcript: SpeakerLabelledTranscript,
+) -> RoleAssignmentResult:
+    """Create a safe tentative role map for draft generation.
+
+    The original role assignment remains on PipelineResult for UI review
+    metadata. This execution copy only prevents the draft pipeline from being
+    blocked by a role-review banner. If a role is unresolved, use explicit
+    utterance-language cues to choose a tentative role:
+    - dentist-like clinical action/documentation language -> dentist
+    - patient symptom/question language -> patient
+    - otherwise -> assistant_or_other
+
+    The UI still receives role_review_required=true from the original result, so
+    the clinician remains the final authority.
+    """
+    utterances_by_speaker: dict[str, list[str]] = {}
+    for utterance in transcript.utterances:
+        utterances_by_speaker.setdefault(utterance.speaker_id, []).append(utterance.text)
+
+    assignments = []
+    for assignment in role_assignment.assignments:
+        if _assignment_needs_review(assignment):
+            role = _tentative_role_from_utterances(
+                utterances_by_speaker.get(assignment.speaker_id, [])
+            )
+            assignments.append(
+                assignment.model_copy(update={"role": role, "status": assignment.status})
+            )
+            continue
+        assignments.append(assignment)
+    return role_assignment.model_copy(update={"assignments": assignments})
+
+
+def _tentative_role_from_utterances(utterances: list[str]) -> DentistRole:
+    text = " ".join(utterances).casefold().replace("i̇", "i")
+    dentist_markers = (
+        "ağzınızı aç",
+        "agzinizi ac",
+        "görüyorum",
+        "goruyorum",
+        "röntgen",
+        "rontgen",
+        "perküsyon",
+        "perkusyon",
+        "planlandı",
+        "planlandi",
+        "planlayalım",
+        "planlayalim",
+        "yapılacak",
+        "yapilacak",
+        "kanal tedavisi",
+        "geçici restorasyon",
+        "gecici restorasyon",
+        "geçici dolgu",
+        "gecici dolgu",
+        "kompozit dolgu var",
+        "muayene",
+    )
+    patient_markers = (
+        "ağrım",
+        "agrim",
+        "şikayet",
+        "sikayet",
+        "hassasiyetim",
+        "benim dişim",
+        "benim disim",
+        "dişimi",
+        "disimi",
+        "yani",
+        "mi?",
+        "değil mi",
+        "degil mi",
+    )
+    if any(marker in text for marker in dentist_markers):
+        return DentistRole.DENTIST
+    if any(marker in text for marker in patient_markers):
+        return DentistRole.PATIENT
+    return DentistRole.ASSISTANT_OR_OTHER
+
+
+def _manual_condition_family(condition: DentalCondition) -> str:
+    if condition == DentalCondition.RCT:
+        return "kanal_tedavisi"
+    if condition == DentalCondition.COMPOSITE:
+        return "kompozit_dolgu"
+    if condition == DentalCondition.MISSING:
+        return "dis_cekimi"
+    return "manuel_bulgu"
+
+
 def _continue_after_role_assignment(
     result: PipelineResult,
     speaker_labelled: SpeakerLabelledTranscript,
     role_assignment: RoleAssignmentResult,
     llm_provider: LLMProvider,
+    review_role_assignment: Optional[RoleAssignmentResult] = None,
 ) -> PipelineResult:
     role_labelled = stages.apply_dentist_role_correction(speaker_labelled, role_assignment)
     result.role_labelled_transcript = role_labelled
 
     try:
-        facts = stages.extract_clinical_facts(role_labelled, llm_provider)
-        note = stages.generate_clinical_note(facts, llm_provider)
-        procedures = stages.extract_dental_chart_commands(facts, llm_provider)
-        code_suggestions = stages.match_codes_and_checklist(procedures, facts, llm_provider)
+        facts = _time_pipeline_stage(
+            "extract_clinical_facts",
+            result.session_id,
+            lambda: stages.extract_clinical_facts(role_labelled, llm_provider),
+        )
+        facts = _mark_source_role_confidence(facts, review_role_assignment or role_assignment)
+        note, procedures = _run_note_and_chart_parallel(facts, llm_provider, result.session_id)
+        code_suggestions = _time_pipeline_stage(
+            "match_codes_and_checklist",
+            result.session_id,
+            lambda: stages.match_codes_and_checklist(procedures, facts, llm_provider),
+        )
     except SourceRoleInvariantViolation:
         result.status = PipelineStatus.NEEDS_DENTIST_ROLE_REVIEW
         result.stopped_at_stage = "facts_extraction_invariant_violation"
@@ -591,3 +846,60 @@ def _continue_after_role_assignment(
     result.status = PipelineStatus.AWAITING_DENTIST_REVIEW
     result.stopped_at_stage = "dentist_review"
     return result
+
+
+def _time_pipeline_stage(stage_name: str, session_id: Optional[str], func):
+    started_at = time.time()
+    try:
+        return func()
+    finally:
+        duration_sec = time.time() - started_at
+        logger.warning(
+            "pipeline_timing stage=%s session_id=%s duration_sec=%.3f",
+            stage_name,
+            session_id or "unknown",
+            duration_sec,
+        )
+
+
+def _run_note_and_chart_parallel(facts, llm_provider: LLMProvider, session_id: Optional[str]):
+    return asyncio.run(_run_note_and_chart_parallel_async(facts, llm_provider, session_id))
+
+
+async def _run_note_and_chart_parallel_async(facts, llm_provider: LLMProvider, session_id: Optional[str]):
+    return await asyncio.gather(
+        asyncio.to_thread(
+            _time_pipeline_stage,
+            "generate_clinical_note",
+            session_id,
+            lambda: stages.generate_clinical_note(facts, llm_provider),
+        ),
+        asyncio.to_thread(
+            _time_pipeline_stage,
+            "extract_dental_chart_commands",
+            session_id,
+            lambda: stages.extract_dental_chart_commands(facts, llm_provider),
+        ),
+    )
+
+
+def _mark_source_role_confidence(
+    facts,
+    role_assignment: RoleAssignmentResult,
+):
+    uncertain_speakers = {
+        assignment.speaker_id
+        for assignment in role_assignment.assignments
+        if _assignment_needs_review(assignment)
+    }
+    marked_facts = [
+        fact.model_copy(
+            update={
+                "source_role_confidence": (
+                    "uncertain" if fact.source_speaker in uncertain_speakers else "clear"
+                )
+            }
+        )
+        for fact in facts.facts
+    ]
+    return facts.model_copy(update={"facts": marked_facts})

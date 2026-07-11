@@ -21,14 +21,18 @@ from app.api.auth import AuthContext, get_auth_context
 from app.api.session_pipeline import (
     AudioProcessingReviewOut,
     ApproveReviewRequest,
+    ManualFindingRequest,
     PipelineReviewResponse,
     ResumeRoleReviewRequest,
+    SpeakerRolePatchRequest,
     TranscriptAnalyzeRequest,
     TranscriptResumeAfterRoleReviewRequest,
     approve_session_review,
     approve_review,
     analyze_transcript,
+    add_manual_finding_to_session,
     create_session_from_transcript,
+    patch_session_speaker_role,
     resume_session_after_role_review,
     resume_transcript_after_role_review,
     to_review_response,
@@ -36,6 +40,8 @@ from app.api.session_pipeline import (
 from app.db import create_database_engine, create_session_factory, init_database
 from app.prompts.loader import load_system_prompt
 from app.providers.llm import LLMProvider
+from app.pipeline.orchestrator import run_perio_pipeline
+from app.pipeline.types import PerioSessionResult
 from app.providers.audio_processing import (
     AudioProcessingProvider,
     AudioProviderConfigurationError,
@@ -141,6 +147,10 @@ class ChatResponse(BaseModel):
     source: str = "registered_clinical_records"
 
 
+class PerioDictationRequest(BaseModel):
+    dictation: str
+
+
 @auth_router.post("/login", response_model=LoginResponse)
 def login_endpoint(
     request: LoginRequest,
@@ -244,6 +254,51 @@ def get_session_endpoint(
     return session
 
 
+@router.post("/{session_id}/perio", response_model=PerioSessionResult)
+def extract_perio_session_endpoint(
+    session_id: str,
+    request: PerioDictationRequest,
+    llm_provider: LLMProvider = Depends(get_llm_provider),
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> PerioSessionResult:
+    try:
+        result = run_perio_pipeline(request.dictation, llm_provider)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    repository.save_transcript(
+        session_id,
+        [{"speaker_id": "dentist", "text": request.dictation.strip()}],
+        source="perio_dictation",
+        clinic_id=auth.clinic_id,
+        actor_user_id=auth.user_id,
+    )
+    repository.upsert_session(
+        session_id,
+        status="draft",
+        current_stage="perio_review",
+        clinic_id=auth.clinic_id,
+        dentist_id=auth.user_id,
+        session_type="perio",
+    )
+    repository.add_audit_log(
+        user_id=auth.user_id,
+        session_id=session_id,
+        clinic_id=auth.clinic_id,
+        action="perio_extracted",
+        entity_type="perio_session_result",
+        entity_id=session_id,
+        source="ai",
+        metadata_json={
+            "measurement_count": len(result.measurements),
+            "tooth_summary_count": len(result.tooth_summaries),
+            "uncertain_item_count": len(result.uncertain_items),
+        },
+    )
+    return result
+
+
 @router.post("/{session_id}/resume-role-review", response_model=PipelineReviewResponse)
 def resume_session_role_review_endpoint(
     session_id: str,
@@ -263,6 +318,55 @@ def resume_session_role_review_endpoint(
         clinic_id=auth.clinic_id,
         actor_user_id=auth.user_id,
         transcript_source="role_reviewed_transcript",
+    )
+    return to_review_response(result)
+
+
+@router.patch("/{session_id}/speaker-role", response_model=PipelineReviewResponse)
+def patch_session_speaker_role_endpoint(
+    session_id: str,
+    request: SpeakerRolePatchRequest,
+    llm_provider: LLMProvider = Depends(get_llm_provider),
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> PipelineReviewResponse:
+    try:
+        result = patch_session_speaker_role(session_id, request, llm_provider)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session bulunamadı.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    repository.save_pipeline_result(
+        result,
+        clinic_id=auth.clinic_id,
+        actor_user_id=auth.user_id,
+        transcript_source="speaker_role_patch",
+    )
+    return to_review_response(result)
+
+
+@router.post("/{session_id}/findings", response_model=PipelineReviewResponse)
+def add_manual_finding_endpoint(
+    session_id: str,
+    request: ManualFindingRequest,
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> PipelineReviewResponse:
+    try:
+        result = add_manual_finding_to_session(session_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session bulunamadı.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    repository.add_audit_log(
+        user_id=auth.user_id,
+        session_id=session_id,
+        clinic_id=auth.clinic_id,
+        action="manual_finding_added",
+        entity_type="procedure",
+        entity_id=None,
+        source="manual",
+        metadata_json=request.model_dump(mode="json"),
     )
     return to_review_response(result)
 

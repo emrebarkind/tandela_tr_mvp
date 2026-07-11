@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
@@ -85,6 +85,7 @@ class SessionRepository:
         clinic_id: str,
         patient_id: Optional[str] = None,
         dentist_id: Optional[str] = None,
+        session_type: Optional[Literal["clinical_note", "perio"]] = None,
     ) -> Session:
         self.ensure_clinic(clinic_id)
         if dentist_id is not None:
@@ -98,6 +99,7 @@ class SessionRepository:
                 patient_id=patient_id,
                 dentist_id=dentist_id,
                 status=mapped_status,
+                session_type=session_type or "clinical_note",
                 current_stage=current_stage,
             )
             self.db.add(record)
@@ -106,6 +108,8 @@ class SessionRepository:
                 raise PermissionError("Session farklı kliniğe ait.")
             record.status = mapped_status
             record.current_stage = current_stage
+            if session_type is not None:
+                record.session_type = session_type
             if patient_id is not None:
                 record.patient_id = patient_id
             if dentist_id is not None:
@@ -380,6 +384,7 @@ class SessionRepository:
             "patient_id": record.patient_id,
             "dentist_id": record.dentist_id,
             "status": record.status,
+            "session_type": record.session_type,
             "current_stage": record.current_stage,
             "started_at": record.started_at.isoformat() if record.started_at else None,
             "completed_at": record.completed_at.isoformat() if record.completed_at else None,

@@ -49,10 +49,12 @@ HARD RULES:
    - discussed: mentioned without a clear decision
    - unclear: conflicting or internally ambiguous status
    If wording conflicts, use unclear and add uncertain_items.
-8. FDI tooth_number_fdi must be an integer in a valid permanent FDI range
-   (11-18, 21-28, 31-38, 41-48). Only assign it when clearly stated or safely
+8. FDI tooth_number_fdi must be an integer in a valid FDI range:
+   permanent teeth (11-18, 21-28, 31-38, 41-48) or primary teeth
+   (51-55, 61-65, 71-75, 81-85). Only assign it when clearly stated or safely
    normalized from an unambiguous Turkish expression. Do not infer from mumbled
-   or hedged numbers ("yirmi alti mi", "tam okunmuyor").
+   or hedged numbers ("yirmi alti mi", "tam okunmuyor"). Never output invalid
+   combinations such as 19, 20, 29, 30, 49, 50, 56, 60, 86.
 9. Each source_quote must be copied exactly from one utterance. Keep it short
    but sufficient. Do not paraphrase source_quote.
    If one dentist utterance contains linked findings or linked plan clauses,

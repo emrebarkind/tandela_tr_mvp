@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 from app.pipeline import stages
 from app.pipeline.stages import SourceRoleInvariantViolation
@@ -21,6 +22,7 @@ from app.pipeline.types import (
     ToothGroup,
     ToothSurface,
     ToothType,
+    ToothPerioSummary,
     Utterance,
     derive_fdi_classification,
 )
@@ -42,6 +44,25 @@ class ScriptedLLM(LLMProvider):
 
 
 class PipelineContractTests(unittest.TestCase):
+    def test_perio_summary_invariant_clears_and_logs_ineligible_furcation(self) -> None:
+        violating_summary = ToothPerioSummary.model_construct(
+            tooth_number_fdi=11,
+            mobility_grade=None,
+            furcation_grade=2,
+            furcation_site="buccal",
+        )
+
+        with patch.object(stages.logger, "warning") as warning:
+            corrected = stages._enforce_perio_summary_invariant(violating_summary)
+
+        self.assertIsNone(corrected.furcation_grade)
+        self.assertIsNone(corrected.furcation_site)
+        warning.assert_called_once_with(
+            "perio_summary_invariant_corrected: tooth_number_fdi=%s "
+            "reason=furcation_not_valid_for_tooth_type",
+            11,
+        )
+
     def test_assign_roles_floors_single_utterance_clear_to_review_needed(self) -> None:
         transcript = SpeakerLabelledTranscript(
             session_id="role-floor",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Mic, MicOff, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -8,6 +8,10 @@ type LiveTranscriptRecorderProps = {
   sessionId: string;
   apiBase: string;
   disabled?: boolean;
+  showInlineControls?: boolean;
+  controlCommand?: { action: "start" | "stop" | "pause" | "resume"; nonce: number } | null;
+  onStateChange?: (state: "idle" | "connecting" | "recording" | "paused" | "stopping") => void;
+  onElapsedChange?: (elapsedSec: number) => void;
   onTranscriptLine: (line: string) => void;
   onRecordingStopped?: (audioBlob: Blob | null) => void;
 };
@@ -21,31 +25,86 @@ type StreamEvent = {
   message?: string;
 };
 
+type BrowserWindowWithAudioContext = Window & {
+  webkitAudioContext?: typeof AudioContext;
+};
+
 export function LiveTranscriptRecorder({
   sessionId,
   apiBase,
   disabled,
+  showInlineControls = true,
+  controlCommand,
+  onStateChange,
+  onElapsedChange,
   onTranscriptLine,
   onRecordingStopped,
 }: LiveTranscriptRecorderProps) {
-  const [state, setState] = useState<"idle" | "connecting" | "recording" | "stopping">("idle");
+  const [state, setState] = useState<"idle" | "connecting" | "recording" | "paused" | "stopping">("idle");
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [levels, setLevels] = useState<number[]>(() => Array.from({ length: 32 }, () => 0.08));
+  const [elapsedSec, setElapsedSec] = useState(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const startedAtRef = useRef<number | null>(null);
+  const elapsedBaseRef = useRef(0);
 
   const isRecording = state === "recording" || state === "connecting";
+  const isCaptureActive = state === "recording" || state === "connecting" || state === "paused";
+  const statusText =
+    state === "recording"
+      ? "Dinleniyor..."
+      : state === "paused"
+        ? "Duraklatıldı"
+        : state === "connecting" || state === "stopping" || disabled
+          ? "İşleniyor..."
+          : "Kayda hazır";
+
+  useEffect(() => () => stopMeter(), []);
+
+  useEffect(() => {
+    onStateChange?.(state);
+  }, [onStateChange, state]);
+
+  useEffect(() => {
+    if (!controlCommand) return;
+    if (controlCommand.action === "start") void startRecording();
+    if (controlCommand.action === "stop") stopRecording();
+    if (controlCommand.action === "pause") pauseRecording();
+    if (controlCommand.action === "resume") {
+      void resumeRecording();
+    }
+  }, [controlCommand]);
+
+  useEffect(() => {
+    if (state !== "recording") return undefined;
+    startedAtRef.current = Date.now() - elapsedBaseRef.current * 1000;
+    const timer = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - (startedAtRef.current ?? Date.now())) / 1000);
+      elapsedBaseRef.current = elapsed;
+      setElapsedSec(elapsed);
+      onElapsedChange?.(elapsed);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [onElapsedChange, state]);
 
   async function startRecording() {
-    if (isRecording || disabled) return;
+    if (isCaptureActive || disabled) return;
     setError(null);
     setInterim("");
     setState("connecting");
+    elapsedBaseRef.current = 0;
+    setElapsedSec(0);
+    onElapsedChange?.(0);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
+      startMeter(stream);
       const socket = new WebSocket(`${wsBase(apiBase)}/ws/transcribe?session_id=${encodeURIComponent(sessionId)}`);
       socketRef.current = socket;
       chunksRef.current = [];
@@ -94,7 +153,7 @@ export function LiveTranscriptRecorder({
   }
 
   function stopRecording() {
-    if (!isRecording) return;
+    if (!isCaptureActive) return;
     setState("stopping");
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== "inactive") {
@@ -106,7 +165,39 @@ export function LiveTranscriptRecorder({
       window.setTimeout(() => socket.close(), 250);
     }
     stopTracks();
+    stopMeter();
+    startedAtRef.current = null;
+    elapsedBaseRef.current = 0;
+    setElapsedSec(0);
+    onElapsedChange?.(0);
     setState("idle");
+  }
+
+  function pauseRecording() {
+    if (state !== "recording") return;
+    const recorder = mediaRecorderRef.current;
+    if (recorder?.state === "recording") {
+      recorder.pause();
+    }
+    if (startedAtRef.current !== null) {
+      elapsedBaseRef.current = Math.floor((Date.now() - startedAtRef.current) / 1000);
+      setElapsedSec(elapsedBaseRef.current);
+      onElapsedChange?.(elapsedBaseRef.current);
+    }
+    stopMeter();
+    setState("paused");
+  }
+
+  async function resumeRecording() {
+    if (state !== "paused") return;
+    const recorder = mediaRecorderRef.current;
+    if (recorder?.state === "paused") {
+      recorder.resume();
+    }
+    if (streamRef.current) {
+      startMeter(streamRef.current);
+    }
+    setState("recording");
   }
 
   function stopTracks() {
@@ -115,58 +206,121 @@ export function LiveTranscriptRecorder({
     mediaRecorderRef.current = null;
   }
 
+  function startMeter(stream: MediaStream) {
+    stopMeter();
+    const AudioContextCtor = window.AudioContext || (window as BrowserWindowWithAudioContext).webkitAudioContext;
+    if (!AudioContextCtor) return;
+    const audioContext = new AudioContextCtor();
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 128;
+    analyser.smoothingTimeConstant = 0.82;
+    audioContext.createMediaStreamSource(stream).connect(analyser);
+    audioContextRef.current = audioContext;
+    const data = new Uint8Array(analyser.fftSize);
+    const tick = () => {
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let index = 0; index < data.length; index += 1) {
+        const sample = data[index];
+        const centered = (sample - 128) / 128;
+        sum += centered * centered;
+      }
+      const rms = Math.min(1, Math.sqrt(sum / data.length) * 3.2);
+      setLevels((current) => [...current.slice(1), Math.max(0.06, rms)]);
+      animationFrameRef.current = window.requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  function stopMeter() {
+    if (animationFrameRef.current !== null) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+    setLevels(Array.from({ length: 32 }, () => 0.08));
+  }
+
   return (
     <>
-      <div className="relative mx-auto mb-8 size-28">
-        <div className={`absolute inset-0 rounded-full bg-[#31634B]/20 ${isRecording ? "animate-pulse" : ""}`} />
+      <div className="relative mx-auto mb-6 flex size-28 items-center justify-center">
+        {isRecording ? <div className="tandela-pulse-ring absolute inset-0 rounded-full border border-ring" /> : null}
         <button
-          className={`relative z-10 flex size-28 items-center justify-center rounded-full text-white shadow-lg transition-all hover:scale-105 active:scale-95 ${
-            isRecording ? "bg-[#D4503A]" : "bg-[#31634B]"
-          }`}
+          className="relative z-10 flex size-24 items-center justify-center rounded-full border border-ring bg-card text-primary shadow-card transition-colors hover:bg-background active:bg-secondary"
           type="button"
           disabled={disabled || state === "connecting" || state === "stopping"}
-          onClick={() => (isRecording ? stopRecording() : void startRecording())}
-          aria-label={isRecording ? "Kaydı durdur" : "Kaydı başlat"}
+          onClick={() => (isCaptureActive ? stopRecording() : void startRecording())}
+          aria-label={isCaptureActive ? "Kaydı durdur" : "Kaydı başlat"}
         >
-          {isRecording ? <MicOff className="size-12" aria-hidden="true" /> : <Mic className="size-12" aria-hidden="true" />}
+          {isCaptureActive ? <MicOff className="size-10" aria-hidden="true" /> : <Mic className="size-10" aria-hidden="true" />}
         </button>
       </div>
 
-      <div>
-        <h2 className="mb-2 text-xl font-semibold tracking-tight text-[#0A1F1B]">
-          {isRecording ? "Görüşme Kaydediliyor..." : state === "stopping" ? "Kayıt Durduruluyor..." : "Görüşme Kaydı"}
-        </h2>
-        <p className="mx-auto max-w-xs text-sm leading-6 text-[#404943]">
-          {isRecording
-            ? "Sesiniz yapay zeka tarafından gerçek zamanlı olarak metne dönüştürülüyor."
-            : "Kaydı başlatın; analiz kayıt bittikten sonra çalışır."}
+      <div className="space-y-4">
+        <div>
+          <h2 className="mb-2 text-xl font-semibold tracking-tight text-foreground">Görüşme Kaydı</h2>
+          <p className="mx-auto max-w-xs text-sm leading-6 text-muted-foreground">
+            Kaydı başlatın; analiz kayıt bittikten sonra çalışır.
+          </p>
+        </div>
+
+        <Waveform levels={levels} active={isRecording} />
+
+        <p className="text-xs font-medium tracking-wide text-primary" aria-live="polite">
+          {statusText}{isCaptureActive ? ` · ${formatElapsed(elapsedSec)}` : ""}
         </p>
       </div>
 
-      <div className="mt-8 flex flex-wrap justify-center gap-3">
-        <Button type="button" variant="outline" className="h-11 rounded-full border-[#717973] bg-white px-5 text-[#404943]">
-          <Square className="mr-2 size-4" />
-          Duraklat
-        </Button>
-        <Button
-          type="button"
-          className={`h-11 rounded-full px-6 font-semibold text-white shadow-sm ${isRecording ? "bg-[#D4503A] hover:bg-[#BE4030]" : "bg-[#31634B] hover:bg-[#4A7C63]"}`}
-          disabled={disabled || state === "connecting" || state === "stopping"}
-          onClick={() => (isRecording ? stopRecording() : void startRecording())}
-        >
-          {isRecording ? <Square className="mr-2 size-4" /> : <Mic className="mr-2 size-4" />}
-          {isRecording ? "Kaydı Bitir" : "Kaydı Başlat"}
-        </Button>
-      </div>
+      {showInlineControls ? (
+        <div className="mt-8 flex flex-wrap justify-center gap-3">
+          <Button type="button" variant="outline" className="h-11 rounded-full border-border bg-card px-5 text-muted-foreground">
+            <Square className="mr-2 size-4" />
+            Duraklat
+          </Button>
+          <Button
+            type="button"
+            className="h-11 rounded-full bg-primary px-6 font-semibold text-primary-foreground shadow-card hover:bg-primary"
+            disabled={disabled || state === "connecting" || state === "stopping"}
+            onClick={() => (isCaptureActive ? stopRecording() : void startRecording())}
+          >
+            {isCaptureActive ? <Square className="mr-2 size-4" /> : <Mic className="mr-2 size-4" />}
+            {isCaptureActive ? "Kaydı Bitir" : "Kaydı Başlat"}
+          </Button>
+        </div>
+      ) : null}
 
       {interim ? (
-        <div className="mt-5 rounded-2xl border border-[#C0C9C1] bg-[#E1F9F2] px-4 py-3 text-sm leading-6 text-[#404943]">
+        <div className="mt-5 rounded-2xl border border-border bg-secondary px-4 py-3 text-sm leading-6 text-muted-foreground">
           {interim}
         </div>
       ) : null}
       {error ? <p className="mt-4 text-sm font-medium text-destructive">{error}</p> : null}
     </>
   );
+}
+
+function Waveform({ levels, active }: { levels: number[]; active: boolean }) {
+  const points = levels
+    .map((level, index) => {
+      const x = (index / Math.max(1, levels.length - 1)) * 160;
+      const y = 22 - level * 18;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <svg className="mx-auto h-11 w-44 text-primary" viewBox="0 0 160 44" role="img" aria-label={active ? "Ses seviyesi" : "Sessiz kayıt çizgisi"}>
+      <line x1="0" x2="160" y1="22" y2="22" stroke="currentColor" strokeOpacity="0.18" strokeWidth="1" />
+      <polyline fill="none" points={points} stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function formatElapsed(totalSec: number) {
+  const minutes = Math.floor(totalSec / 60).toString().padStart(2, "0");
+  const seconds = (totalSec % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
 }
 
 function preferredMimeType() {

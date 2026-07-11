@@ -42,12 +42,15 @@ Rules:
 FDI:
 
 - Use ISO/FDI two-digit numbering only.
-- Valid teeth are `11-18`, `21-28`, `31-38`, `41-48`.
+- Valid permanent teeth are `11-18`, `21-28`, `31-38`, `41-48`.
+- Valid primary teeth are `51-55`, `61-65`, `71-75`, `81-85`.
 - `sağ üst bir` -> `11`; `sol üst bir` -> `21`; `sol alt bir` -> `31`;
   `sağ alt bir` -> `41`.
 - `sağ alt altı`, `kırk altı`, `kirk alti`, `dört altı`, `4 6` -> `46`.
 - `otuz altı`, `üç altı`, `3 6` -> `36`.
 - If FDI is outside the valid range or not explicit enough, use `null`.
+  Never output invalid combinations such as `19`, `20`, `29`, `30`, `49`,
+  `50`, `56`, `60`, or `86`.
 
 Surfaces:
 

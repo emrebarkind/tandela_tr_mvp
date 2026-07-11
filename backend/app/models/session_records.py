@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from sqlalchemy import DateTime, ForeignKey, Index, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -63,6 +63,9 @@ class Session(Base):
     patient_id: Mapped[Optional[str]] = mapped_column(ForeignKey("patients.id"), nullable=True, index=True)
     dentist_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False, index=True)
+    session_type: Mapped[Literal["clinical_note", "perio"]] = mapped_column(
+        String(32), default="clinical_note", server_default="clinical_note", nullable=False, index=True
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     current_stage: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)

@@ -17,7 +17,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Ortak durum etiketleri (CLAUDE.md §4.7 — sayısal confidence UI'da YASAK,
@@ -223,6 +223,7 @@ class ClinicalFact(BaseModel):
     # source_speaker + source_quote taşır (Optional DEĞİL; provenance'sız fact yok).
     source_role: DentistRole
     source_speaker: str  # diarization speaker_id (örn. "A"/"B"), rol ataması SONRASI bile saklanır
+    source_role_confidence: str = "clear"
     tooth_number_fdi: Optional[int] = None  # doğrulanmış FDI (11–48 veya 51–85), yoksa None
     status: Optional[ProcedureStatus] = None
     is_uncertain: bool = False  # "şüpheli/gerekebilir/olabilir" → True, asla kesinleştirilmez
@@ -252,6 +253,8 @@ class NoteSentence(BaseModel):
     text: str
     source_role: DentistRole
     source_quote: str
+    source_speaker: Optional[str] = None
+    source_role_confidence: str = "clear"
 
 
 class ClinicalNoteDraft(BaseModel):
@@ -368,6 +371,99 @@ def derive_fdi_classification(
     return dentition, ToothType.MOLAR, ToothGroup.POSTERIOR
 
 
+# ---------------------------------------------------------------------------
+# Periodontal charting
+# ---------------------------------------------------------------------------
+
+
+class PerioSite(str, Enum):
+    """Six periodontal recording sites per tooth."""
+
+    MB = "MB"
+    B = "B"
+    DB = "DB"
+    ML = "ML"
+    L = "L"
+    DL = "DL"
+
+
+class PerioMeasurement(BaseModel):
+    """One site-level periodontal measurement.
+
+    Attachment level is intentionally not an LLM input or stored raw value.
+    It is derived only from the two recorded probe measurements.
+    """
+
+    tooth_number_fdi: int
+    site: PerioSite
+    pocket_depth_mm: Optional[int] = None
+    gingival_margin_mm: Optional[int] = None
+    bleeding_on_probing: Optional[bool] = None
+    plaque: Optional[bool] = None
+    recession_mm: Optional[int] = None
+    source_quote: str
+    is_uncertain: bool = False
+
+    @field_validator("tooth_number_fdi")
+    @classmethod
+    def validate_tooth_number_fdi(cls, value: int) -> int:
+        if not is_valid_fdi_number(value):
+            raise ValueError("tooth_number_fdi must be a valid FDI tooth number")
+        return value
+
+    @computed_field(return_type=Optional[int])
+    @property
+    def attachment_level_mm(self) -> Optional[int]:
+        if self.pocket_depth_mm is None or self.gingival_margin_mm is None:
+            return None
+        return self.pocket_depth_mm - self.gingival_margin_mm
+
+
+class ToothPerioSummary(BaseModel):
+    """Tooth-level periodontal findings; mobility is never site-level."""
+
+    tooth_number_fdi: int
+    mobility_grade: Optional[int] = None
+    furcation_grade: Optional[int] = None
+    furcation_site: Optional[str] = None
+
+    @field_validator("tooth_number_fdi")
+    @classmethod
+    def validate_tooth_number_fdi(cls, value: int) -> int:
+        if not is_valid_fdi_number(value):
+            raise ValueError("tooth_number_fdi must be a valid FDI tooth number")
+        return value
+
+    @field_validator("mobility_grade", "furcation_grade")
+    @classmethod
+    def validate_grade(cls, value: Optional[int]) -> Optional[int]:
+        if value is not None and not 0 <= value <= 3:
+            raise ValueError("periodontal grades must be between 0 and 3")
+        return value
+
+    @model_validator(mode="after")
+    def clear_furcation_for_ineligible_teeth(self) -> "ToothPerioSummary":
+        dentition, tooth_type, _ = derive_fdi_classification(self.tooth_number_fdi)
+        tooth_position = self.tooth_number_fdi % 10
+        is_first_permanent_premolar = (
+            dentition == Dentition.PERMANENT
+            and tooth_type == ToothType.PREMOLAR
+            and tooth_position == 4
+        )
+        if tooth_type != ToothType.MOLAR and not is_first_permanent_premolar:
+            self.furcation_grade = None
+            self.furcation_site = None
+        return self
+
+
+class PerioSessionResult(BaseModel):
+    """Draft periodontal extraction result for one dedicated perio session."""
+
+    measurements: list[PerioMeasurement] = Field(default_factory=list)
+    tooth_summaries: list[ToothPerioSummary] = Field(default_factory=list)
+    uncertain_items: list[str] = Field(default_factory=list)
+
+
 class ProcedureObject(BaseModel):
     procedure_family: str  # örn. "kompozit_dolgu", "kanal_tedavisi", "dis_cekimi"
     tooth_number_fdi: Optional[int] = None  # doğrulanmış FDI, yoksa None (mırıltıdan üretilmez)
@@ -381,6 +477,9 @@ class ProcedureObject(BaseModel):
     treatment_kind: Optional[TreatmentKind] = None
     status: ProcedureStatus = ProcedureStatus.UNCLEAR
     source_quotes: list[str] = Field(default_factory=list)
+    source_role: DentistRole = DentistRole.DENTIST
+    is_manual: bool = False
+    manual_note: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

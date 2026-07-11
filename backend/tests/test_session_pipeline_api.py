@@ -12,12 +12,15 @@ from app.api.main import app
 from app.api.routes import get_llm_provider, get_session_repository
 from app.api.session_pipeline import (
     ApproveReviewRequest,
+    ManualFindingRequest,
     RoleCorrectionIn,
     TranscriptAnalyzeRequest,
     TranscriptResumeAfterRoleReviewRequest,
     TranscriptUtteranceIn,
     approve_review,
+    add_manual_finding_to_session,
     analyze_transcript,
+    create_session_from_transcript,
     resume_transcript_after_role_review,
     to_review_response,
 )
@@ -73,11 +76,96 @@ class ScriptedLLM(LLMProvider):
         return json.dumps(output, ensure_ascii=False)
 
 
+class PerioScriptedLLM(LLMProvider):
+    def complete(self, system_prompt: str, user_input: str) -> str:
+        if "tooth_segments" in system_prompt:
+            output = {
+                "tooth_segments": [
+                    {
+                        "tooth_number_fdi": 16,
+                        "source_quote": "16 bukkal üç dört dört, mobilite bir, furkasyon iki bukkal.",
+                        "is_uncertain": False,
+                        "sites": [
+                            {"site": "MB", "pocket_depth_mm": 3},
+                            {"site": "B", "pocket_depth_mm": 4},
+                            {"site": "DB", "pocket_depth_mm": 4},
+                        ],
+                    }
+                ],
+                "unassigned_segments": [],
+                "uncertain_items": [],
+            }
+        else:
+            output = {
+                "summaries": [
+                    {
+                        "tooth_number_fdi": 16,
+                        "mobility_grade": 1,
+                        "furcation_grade": 2,
+                        "furcation_site": "buccal",
+                        "source_quote": "16 bukkal üç dört dört, mobilite bir, furkasyon iki bukkal.",
+                        "is_uncertain": False,
+                    }
+                ],
+                "uncertain_items": [],
+            }
+        return json.dumps(output, ensure_ascii=False)
+
+
 class SessionPipelineApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         app.dependency_overrides.clear()
 
-    def test_analyze_transcript_stops_before_facts_when_role_gate_blocks(self) -> None:
+    def test_perio_endpoint_runs_parallel_extractions_and_audits_separate_session(self) -> None:
+        calls: list[tuple[str, dict]] = []
+
+        class StubRepository:
+            def upsert_session(self, session_id: str, **kwargs):
+                calls.append(("upsert_session", {"session_id": session_id, **kwargs}))
+
+            def save_transcript(self, session_id: str, utterances: list[dict], **kwargs):
+                calls.append(
+                    (
+                        "save_transcript",
+                        {"session_id": session_id, "utterances": utterances, **kwargs},
+                    )
+                )
+
+            def add_audit_log(self, **kwargs):
+                calls.append(("add_audit_log", kwargs))
+
+        app.dependency_overrides[get_llm_provider] = lambda: PerioScriptedLLM()
+        app.dependency_overrides[get_session_repository] = lambda: StubRepository()
+        client = TestClient(app)
+
+        response = client.post(
+            "/sessions/perio-integration/perio",
+            headers=AUTH_HEADERS,
+            json={
+                "dictation": "16 bukkal üç dört dört, mobilite bir, furkasyon iki bukkal."
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload["measurements"]), 6)
+        self.assertEqual(payload["measurements"][0]["tooth_number_fdi"], 16)
+        self.assertEqual(len(payload["tooth_summaries"]), 1)
+        self.assertEqual(payload["tooth_summaries"][0]["mobility_grade"], 1)
+        self.assertEqual(payload["tooth_summaries"][0]["furcation_grade"], 2)
+        self.assertEqual(payload["uncertain_items"], [])
+
+        upsert = next(data for name, data in calls if name == "upsert_session")
+        self.assertEqual(upsert["session_id"], "perio-integration")
+        self.assertEqual(upsert["current_stage"], "perio_review")
+        transcript = next(data for name, data in calls if name == "save_transcript")
+        self.assertEqual(transcript["source"], "perio_dictation")
+        audit = next(data for name, data in calls if name == "add_audit_log")
+        self.assertEqual(audit["action"], "perio_extracted")
+        self.assertEqual(audit["source"], "ai")
+        self.assertNotIn("dictation", audit["metadata_json"])
+
+    def test_analyze_transcript_marks_role_review_but_continues_to_draft(self) -> None:
         request = TranscriptAnalyzeRequest(
             session_id="api-gate",
             utterances=[
@@ -103,19 +191,21 @@ class SessionPipelineApiTests(unittest.TestCase):
 
         result = analyze_transcript(request, llm)
 
-        self.assertEqual(result.status, PipelineStatus.NEEDS_DENTIST_ROLE_REVIEW)
-        self.assertEqual(result.stopped_at_stage, "role_assignment")
+        self.assertEqual(result.status, PipelineStatus.AWAITING_DENTIST_REVIEW)
+        self.assertEqual(result.stopped_at_stage, "dentist_review")
         self.assertIsNotNone(result.role_assignment)
-        self.assertIsNone(result.clinical_facts)
-        self.assertIsNone(result.clinical_note)
+        self.assertIsNotNone(result.clinical_facts)
+        self.assertIsNotNone(result.clinical_note)
         self.assertEqual(result.procedures, [])
         self.assertEqual(result.code_suggestions, [])
 
         response = to_review_response(result)
-        self.assertEqual(response.next_action, "review_speaker_roles")
+        self.assertEqual(response.next_action, "review_note_and_codes")
+        self.assertTrue(response.role_review_required)
         self.assertIsNotNone(response.role_review)
-        self.assertIsNone(response.dentist_review)
+        self.assertIsNotNone(response.dentist_review)
         self.assertEqual(response.role_review.speakers[0].speaker_id, "A")
+        self.assertEqual(response.uncertain_speakers[0].speaker_id, "A")
 
     def test_analyze_route_returns_review_dto_without_internal_pipeline_fields(self) -> None:
         app.dependency_overrides[get_llm_provider] = lambda: ScriptedLLM(
@@ -146,8 +236,10 @@ class SessionPipelineApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["next_action"], "review_speaker_roles")
+        self.assertEqual(payload["next_action"], "review_note_and_codes")
+        self.assertTrue(payload["role_review_required"])
         self.assertIn("role_review", payload)
+        self.assertIn("dentist_review", payload)
         self.assertNotIn("speaker_labelled_transcript", payload)
         self.assertNotIn("clinical_facts", payload)
 
@@ -245,6 +337,71 @@ class SessionPipelineApiTests(unittest.TestCase):
                     "ambiguity_note": None,
                     "dentist_must_choose": True,
                 },
+                {
+                    "facts": [
+                        {
+                            "category": "clinical_findings",
+                            "text": "46 numarada derin çürük görüyorum.",
+                            "source_quote": "46 numarada derin çürük görüyorum",
+                            "source_role": "dentist",
+                            "source_speaker": "A",
+                            "tooth_number_fdi": 46,
+                            "status": None,
+                            "is_uncertain": False,
+                        },
+                        {
+                            "category": "procedures",
+                            "text": "46 numara için kanal tedavisi planlandı.",
+                            "source_quote": "46 numara için kanal tedavisi planlandı",
+                            "source_role": "dentist",
+                            "source_speaker": "A",
+                            "tooth_number_fdi": 46,
+                            "status": "planned",
+                            "is_uncertain": False,
+                        },
+                    ],
+                    "uncertain_items": [],
+                },
+                {
+                    "patient_complaint": [],
+                    "history": [],
+                    "clinical_findings": [
+                        {
+                            "sentence_id": "s0",
+                            "text": "46 numarada derin çürük görüyorum.",
+                            "source_role": "dentist",
+                            "source_quote": "46 numarada derin çürük görüyorum",
+                        }
+                    ],
+                    "assessment": [],
+                    "treatment_plan": [],
+                    "procedures_note": [
+                        {
+                            "sentence_id": "s1",
+                            "text": "46 numara için kanal tedavisi planlandı.",
+                            "source_role": "dentist",
+                            "source_quote": "46 numara için kanal tedavisi planlandı",
+                        }
+                    ],
+                    "uncertain_items": [],
+                    "is_draft": True,
+                },
+                [
+                    {
+                        "tooth_fdi": 46,
+                        "surfaces": None,
+                        "condition": "rct",
+                        "status": "planned",
+                        "source_quote": "46 numara için kanal tedavisi planlandı",
+                    }
+                ],
+                {
+                    "explanations": [
+                        {"code": "END330", "fit_reason": "46 daimi molar olduğu için aday.", "caveat": "Kanal sayısı dokümantasyon için kontrol edilmeli."},
+                    ],
+                    "ambiguity_note": None,
+                    "dentist_must_choose": True,
+                },
             ]
         )
         app.dependency_overrides[get_llm_provider] = lambda: llm
@@ -266,9 +423,10 @@ class SessionPipelineApiTests(unittest.TestCase):
 
         self.assertEqual(create_response.status_code, 200)
         create_payload = create_response.json()
-        self.assertEqual(create_payload["review_state"], "needs_dentist_role_review")
-        self.assertEqual(create_payload["next_action"], "review_speaker_roles")
-        self.assertIsNone(create_payload["dentist_review"])
+        self.assertEqual(create_payload["review_state"], "draft_requires_dentist_approval")
+        self.assertEqual(create_payload["next_action"], "review_note_and_codes")
+        self.assertTrue(create_payload["role_review_required"])
+        self.assertIsNotNone(create_payload["dentist_review"])
         self.assertEqual(create_payload["role_review"]["speakers"][2]["review_state"], "review_needed")
 
         resume_response = client.post(
@@ -406,7 +564,7 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertEqual(len(response.dentist_review.procedures), 1)
         self.assertEqual(len(response.dentist_review.procedures[0].candidates), 1)
 
-    def test_resume_after_role_review_blocks_when_correction_omits_speaker(self) -> None:
+    def test_resume_after_role_review_marks_missing_speaker_but_continues_to_draft(self) -> None:
         request = TranscriptResumeAfterRoleReviewRequest(
             session_id="api-resume-missing-role",
             utterances=[
@@ -420,12 +578,13 @@ class SessionPipelineApiTests(unittest.TestCase):
 
         result = resume_transcript_after_role_review(request, ScriptedLLM([]))
 
-        self.assertEqual(result.status, PipelineStatus.NEEDS_DENTIST_ROLE_REVIEW)
-        self.assertEqual(result.stopped_at_stage, "role_assignment")
-        self.assertIsNone(result.clinical_facts)
+        self.assertEqual(result.status, PipelineStatus.AWAITING_DENTIST_REVIEW)
+        self.assertEqual(result.stopped_at_stage, "dentist_review")
+        self.assertIsNotNone(result.clinical_facts)
 
         response = to_review_response(result)
-        self.assertEqual(response.next_action, "review_speaker_roles")
+        self.assertEqual(response.next_action, "review_note_and_codes")
+        self.assertTrue(response.role_review_required)
         self.assertIsNotNone(response.role_review)
 
     def test_approve_review_moves_to_export_next_action(self) -> None:
@@ -490,6 +649,101 @@ class SessionPipelineApiTests(unittest.TestCase):
 
         self.assertIsNotNone(response.dentist_review)
         self.assertEqual(response.dentist_review.procedures[0].procedure.tooth_number_fdi, 44)
+
+    def test_add_manual_finding_appends_validated_procedure(self) -> None:
+        request = TranscriptAnalyzeRequest(
+            session_id="manual-finding",
+            utterances=[
+                TranscriptUtteranceIn(
+                    speaker_id="A",
+                    text="46 numara için kanal tedavisi planlandı.",
+                )
+            ],
+        )
+        llm = ScriptedLLM(
+            [
+                {
+                    "assignments": [
+                        {
+                            "speaker_id": "A",
+                            "role": "dentist",
+                            "status": "clear",
+                            "utterance_count": 1,
+                            "reason": "Hekim.",
+                        }
+                    ],
+                    "manual_review_required": False,
+                },
+                {
+                    "facts": [],
+                    "uncertain_items": [],
+                },
+                {
+                    "patient_complaint": [],
+                    "history": [],
+                    "clinical_findings": [],
+                    "assessment": [],
+                    "treatment_plan": [],
+                    "procedures_note": [],
+                    "uncertain_items": [],
+                    "is_draft": True,
+                },
+            ]
+        )
+
+        create_session_from_transcript(request, llm)
+        result = add_manual_finding_to_session(
+            "manual-finding",
+            ManualFindingRequest(tooth_number_fdi=27, condition="caries", note="Manuel çürük bulgusu."),
+        )
+
+        self.assertEqual(result.status, PipelineStatus.AWAITING_DENTIST_REVIEW)
+        self.assertEqual(result.procedures[-1].tooth_number_fdi, 27)
+        self.assertEqual(result.procedures[-1].condition.value, "caries")
+        self.assertTrue(result.procedures[-1].is_manual)
+        self.assertEqual(result.procedures[-1].source_role, DentistRole.DENTIST)
+
+    def test_add_manual_finding_rejects_invalid_fdi(self) -> None:
+        request = TranscriptAnalyzeRequest(
+            session_id="manual-finding-invalid",
+            utterances=[
+                TranscriptUtteranceIn(speaker_id="A", text="Not yok."),
+            ],
+        )
+        llm = ScriptedLLM(
+            [
+                {
+                    "assignments": [
+                        {
+                            "speaker_id": "A",
+                            "role": "dentist",
+                            "status": "clear",
+                            "utterance_count": 1,
+                            "reason": "Hekim.",
+                        }
+                    ],
+                    "manual_review_required": False,
+                },
+                {"facts": [], "uncertain_items": []},
+                {
+                    "patient_complaint": [],
+                    "history": [],
+                    "clinical_findings": [],
+                    "assessment": [],
+                    "treatment_plan": [],
+                    "procedures_note": [],
+                    "uncertain_items": [],
+                    "is_draft": True,
+                },
+            ]
+        )
+
+        create_session_from_transcript(request, llm)
+        with self.assertRaises(ValueError):
+            add_manual_finding_to_session(
+                "manual-finding-invalid",
+                ManualFindingRequest(tooth_number_fdi=20, condition="caries"),
+            )
 
     def test_audio_process_route_deletes_raw_audio_when_provider_not_configured(self) -> None:
         client = TestClient(app)
@@ -589,7 +843,8 @@ class SessionPipelineApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["next_action"], "review_speaker_roles")
+        self.assertEqual(payload["next_action"], "review_note_and_codes")
+        self.assertTrue(payload["role_review_required"])
         self.assertEqual(payload["audio_processing"]["status"], "transcript_ready")
         self.assertTrue(payload["audio_processing"]["raw_audio_deleted"])
         self.assertEqual(payload["audio_processing"]["transcript"]["session_id"], "audio-phase-c")

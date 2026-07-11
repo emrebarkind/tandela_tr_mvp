@@ -6,8 +6,10 @@ keeps Deepgram-specific HTTP and response mapping behind AudioProcessingProvider
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+import time
 from typing import Any, Optional, Union
 
 import httpx
@@ -27,6 +29,9 @@ from app.providers.audio_processing import (
     AudioProviderConfigurationError,
     AudioProviderRuntimeError,
 )
+
+
+logger = logging.getLogger(__name__)
 from app.providers.gemini_provider import _load_env_file
 
 _ENV_FILE = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
@@ -169,6 +174,7 @@ class DeepgramAudioProcessingProvider(AudioProcessingProvider):
         }
         client = self._client or httpx.Client(timeout=self.config.timeout_sec)
         should_close = self._client is None
+        started_at = time.time()
         try:
             with path.open("rb") as audio_file:
                 response = client.post(
@@ -187,6 +193,11 @@ class DeepgramAudioProcessingProvider(AudioProcessingProvider):
         except ValueError as exc:
             raise AudioProviderRuntimeError("Deepgram provider geçersiz JSON döndürdü.") from exc
         finally:
+            logger.warning(
+                "audio_timing stage=deepgram_http session_id=%s provider=Deepgram duration_sec=%.3f",
+                audio.session_id,
+                time.time() - started_at,
+            )
             if should_close:
                 client.close()
 
