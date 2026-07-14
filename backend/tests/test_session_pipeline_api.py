@@ -209,6 +209,129 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), snapshot)
 
+    def test_perio_approve_persists_audit_and_guards_export_until_approved(self) -> None:
+        snapshot = {
+            "snapshot_version": 1,
+            "session_id": "perio-approve-test",
+            "session_type": "perio",
+            "transcript": [],
+            "clinical_review": None,
+            "clinical_pipeline": None,
+            "perio_result": {
+                "measurements": [
+                    {
+                        "tooth_number_fdi": 16,
+                        "site": "DB",
+                        "pocket_depth_mm": 3,
+                        "gingival_margin_mm": 0,
+                        "bleeding_on_probing": True,
+                        "plaque": True,
+                        "recession_mm": None,
+                        "source_quote": "16 bukkal üç dört dört.",
+                        "is_uncertain": False,
+                    },
+                    {
+                        "tooth_number_fdi": 16,
+                        "site": "B",
+                        "pocket_depth_mm": 4,
+                        "gingival_margin_mm": -2,
+                        "bleeding_on_probing": True,
+                        "plaque": True,
+                        "recession_mm": 2,
+                        "source_quote": "16 bukkal üç dört dört.",
+                        "is_uncertain": False,
+                    },
+                    {
+                        "tooth_number_fdi": 16,
+                        "site": "MB",
+                        "pocket_depth_mm": 4,
+                        "gingival_margin_mm": 0,
+                        "bleeding_on_probing": True,
+                        "plaque": True,
+                        "recession_mm": None,
+                        "source_quote": "16 bukkal üç dört dört.",
+                        "is_uncertain": False,
+                    },
+                ],
+                "tooth_summaries": [
+                    {
+                        "tooth_number_fdi": 16,
+                        "mobility_grade": 1,
+                        "furcation_grade": 2,
+                        "furcation_site": "buccal",
+                    }
+                ],
+                "uncertain_items": [],
+            },
+        }
+        session = SimpleNamespace(
+            id="perio-approve-test",
+            clinic_id="clinic-test",
+            patient_id="patient-perio",
+            session_type="perio",
+            status="draft",
+        )
+        calls: list[tuple[str, dict]] = []
+
+        class StubRepository:
+            def latest_session(self, session_id: str, **kwargs):
+                return session if session_id == session.id else None
+
+            def get_review_snapshot(self, session_id: str, **kwargs):
+                return snapshot if session_id == session.id else None
+
+            def upsert_session(self, session_id: str, **kwargs):
+                session.status = kwargs["status"]
+                calls.append(("upsert_session", {"session_id": session_id, **kwargs}))
+
+            def add_audit_log(self, **kwargs):
+                calls.append(("add_audit_log", kwargs))
+
+            def save_review_snapshot(self, session_id: str, next_snapshot: dict, **kwargs):
+                if next_snapshot is not snapshot:
+                    snapshot.clear()
+                    snapshot.update(next_snapshot)
+                calls.append(("save_review_snapshot", {"session_id": session_id, **kwargs}))
+
+        app.dependency_overrides[get_session_repository] = lambda: StubRepository()
+        client = TestClient(app)
+
+        blocked = client.get(
+            "/sessions/perio-approve-test/perio/export", headers=AUTH_HEADERS
+        )
+        self.assertEqual(blocked.status_code, 409)
+        self.assertIn("onaylanmadan export edilemez", blocked.json()["detail"])
+
+        approved = client.post(
+            "/sessions/perio-approve-test/perio/approve", headers=AUTH_HEADERS
+        )
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.json()["status"], "approved")
+        export_text = approved.json()["export_payload"]["perio_text"]
+        self.assertIn("FDI 16: Cep: DB=3mm B=4mm MB=4mm", export_text)
+        self.assertIn("Attachment: DB=3mm B=6mm MB=4mm", export_text)
+        self.assertIn("Mobilite: 1; Furkasyon: 2 (buccal)", export_text)
+
+        audit = next(data for name, data in calls if name == "add_audit_log")
+        self.assertEqual(audit["action"], "perio_approved")
+        self.assertEqual(audit["source"], "dentist")
+        self.assertEqual(session.status, "approved")
+
+        exported = client.get(
+            "/sessions/perio-approve-test/perio/export", headers=AUTH_HEADERS
+        )
+        self.assertEqual(exported.status_code, 200)
+        self.assertEqual(exported.json()["perio_text"], export_text)
+
+        repeated = client.post(
+            "/sessions/perio-approve-test/perio/approve", headers=AUTH_HEADERS
+        )
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(
+            len([name for name, _ in calls if name == "add_audit_log"]),
+            1,
+        )
+
     def test_analyze_transcript_marks_role_review_but_continues_to_draft(self) -> None:
         request = TranscriptAnalyzeRequest(
             session_id="api-gate",

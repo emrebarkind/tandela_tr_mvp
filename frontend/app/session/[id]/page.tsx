@@ -151,7 +151,28 @@ type PipelineReviewResponse = {
 type SessionMetadata = {
   patient_id?: string | null;
   session_type?: "clinical_note" | "perio";
+  status?: string;
   started_at?: string | null;
+};
+
+type PerioExportPayload = {
+  session_id: string;
+  perio_text: string;
+  audit: {
+    action: string;
+    reviewer_user_id?: string | null;
+    approved: boolean;
+    created_at_utc: string;
+    source: string;
+  };
+  warning: string;
+};
+
+type PerioApprovalResponse = {
+  session_id: string;
+  status: "approved";
+  review_state: "approved";
+  export_payload: PerioExportPayload;
 };
 
 type SessionReviewSnapshot = {
@@ -161,6 +182,7 @@ type SessionReviewSnapshot = {
   transcript: TranscriptUtterance[];
   clinical_review?: PipelineReviewResponse | null;
   perio_result?: PerioSessionResult | null;
+  perio_approval?: PerioApprovalResponse | null;
 };
 
 type ExportPayload = {
@@ -222,6 +244,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState("transcript");
   const [sessionType, setSessionType] = useState<"clinical_note" | "perio">("clinical_note");
   const [persistedPerioResult, setPersistedPerioResult] = useState<PerioSessionResult | null>(null);
+  const [perioExportPayload, setPerioExportPayload] = useState<PerioExportPayload | null>(null);
 
   const utterances = useMemo(() => parseTranscript(transcriptText), [transcriptText]);
   const transcriptDiagnostics = useMemo(() => inspectTranscript(transcriptText), [transcriptText]);
@@ -258,6 +281,10 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
         const snapshotUtterances = snapshot.transcript ?? [];
         setTranscriptText(snapshotUtterances.map((item) => `${item.speaker_id}: ${item.text}`).join("\n"));
         setPersistedPerioResult(snapshot.perio_result ?? null);
+        setPerioExportPayload(snapshot.perio_approval?.export_payload ?? null);
+        if (nextSessionType === "perio") {
+          setApproved(metadata?.status === "approved" && Boolean(snapshot.perio_approval?.export_payload));
+        }
 
         const clinicalReview = snapshot.clinical_review;
         if (!clinicalReview) return;
@@ -322,9 +349,8 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
           <Button
             type="button"
             className="h-10 rounded-lg bg-primary px-5 font-semibold text-primary-foreground hover:bg-primary/80"
-            onClick={() => void approveClinicalReview()}
-            disabled={isLoading || sessionType === "perio" || !displayedNote}
-            title={sessionType === "perio" ? "Perio onayı bu görsel turda backend değişikliği yapılmadığı için pasiftir." : undefined}
+            onClick={() => void (sessionType === "perio" ? approvePerioReview() : approveClinicalReview())}
+            disabled={isLoading || (sessionType === "perio" ? !persistedPerioResult : !displayedNote)}
           >
             {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
             Onayla ve Kaydet
@@ -420,6 +446,25 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     }
   }
 
+  async function approvePerioReview() {
+    if (!persistedPerioResult) {
+      setError("Onay için önce periodontal taslak oluşturulmalı.");
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      const result = await postPerioApproval(`/sessions/${encodeURIComponent(sessionId)}/perio/approve`);
+      setApproved(true);
+      setPerioExportPayload(result.export_payload);
+      setExportMessage("Hekim onayı kaydedildi; periodontal çıktı kopyalama ve indirme için hazır.");
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   function applyBackendResponse(result: PipelineReviewResponse, sourceUtterances: TranscriptUtterance[] = utterances) {
     setResponse(result);
     if (result.dentist_review?.note) {
@@ -478,6 +523,24 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     setExportMessage("TXT dosyası indirildi.");
   }
 
+  async function copyPerioExportToClipboard() {
+    if (!perioExportPayload) return;
+    await navigator.clipboard.writeText(perioExportPayload.perio_text);
+    setExportMessage("Perio export metni panoya kopyalandı.");
+  }
+
+  function downloadPerioExportTxt() {
+    if (!perioExportPayload) return;
+    const blob = new Blob([perioExportPayload.perio_text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${perioExportPayload.session_id}-tandela-perio-export.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setExportMessage("Perio TXT dosyası indirildi.");
+  }
+
   const hasDentalChart = procedures.some((procedure) => procedure.procedure.tooth_number_fdi);
   const hasCodeSuggestions = procedures.some((procedure) => procedure.candidates.length);
   const isPerioSession = sessionType === "perio";
@@ -485,6 +548,16 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   useEffect(() => {
     setActiveWorkspaceTab(defaultTab);
   }, [defaultTab]);
+
+  if (approved && sessionType === "perio" && perioExportPayload) {
+    return (
+      <ApprovedExport
+        message={exportMessage}
+        onCopy={() => void copyPerioExportToClipboard()}
+        onDownloadTxt={downloadPerioExportTxt}
+      />
+    );
+  }
 
   if (approved && exportPayload) {
     return (
@@ -622,6 +695,18 @@ async function postReviewResponse(path: string, body: unknown): Promise<Pipeline
     throw new Error(text || `HTTP ${response.status}`);
   }
   return response.json() as Promise<PipelineReviewResponse>;
+}
+
+async function postPerioApproval(path: string): Promise<PerioApprovalResponse> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: AUTH_HEADERS,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return response.json() as Promise<PerioApprovalResponse>;
 }
 
 async function patchReviewResponse(path: string, body: unknown): Promise<PipelineReviewResponse> {

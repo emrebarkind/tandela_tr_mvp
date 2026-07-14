@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
-import { CheckCircle2, ClipboardCheck, FileText, Loader2, Mic, PencilLine, Save, ShieldCheck, Timer, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ClipboardCheck, FileText, Loader2, Mic, PencilLine, Save, ShieldCheck, Timer, X } from "lucide-react";
 import { useHeader } from "@/components/app/HeaderContext";
 import { ApprovedExport } from "@/components/review/ApprovedExport";
 import { DentalChartPanel } from "@/components/review/DentalChartPanel";
@@ -57,6 +57,22 @@ type Speaker = {
   utterances: number;
   sample: string;
   reason?: string;
+};
+
+type RoleAssignmentSnapshot = {
+  assignments: {
+    speaker_id: string;
+    role: Role;
+    status: SpeakerStatus;
+    utterance_count: number;
+    reason?: string | null;
+  }[];
+};
+
+type SessionReviewSnapshot = {
+  clinical_pipeline?: {
+    role_assignment?: RoleAssignmentSnapshot | null;
+  } | null;
 };
 
 type NoteSentence = {
@@ -280,6 +296,10 @@ function ReviewPageContent() {
   const utterances = useMemo(() => parseTranscript(transcriptText), [transcriptText]);
   const transcriptDiagnostics = useMemo(() => inspectTranscript(transcriptText), [transcriptText]);
   const canAnalyzeTranscript = transcriptDiagnostics.utteranceCount > 0 && transcriptDiagnostics.invalidLines.length === 0;
+  const speakerAssignmentsById = useMemo(
+    () => new Map(speakers.map((speaker) => [speaker.id, speaker])),
+    [speakers],
+  );
 
   const dentistReview = response?.dentist_review ?? null;
   const displayedNote = editableNote ?? dentistReview?.note ?? null;
@@ -598,6 +618,32 @@ function ReviewPageContent() {
     }
     const firstCode = result.dentist_review?.procedures[0]?.candidates[0]?.code;
     if (firstCode) setSelectedCode(firstCode);
+    void hydrateSpeakerAssignments(result.session_id, sourceUtterances);
+  }
+
+  async function hydrateSpeakerAssignments(activeSessionId: string, sourceUtterances: TranscriptUtterance[]) {
+    try {
+      const snapshotResponse = await fetch(`${API_BASE}/sessions/${encodeURIComponent(activeSessionId)}/review`, {
+        headers: AUTH_HEADERS,
+        cache: "no-store",
+      });
+      if (!snapshotResponse.ok) return;
+      const snapshot = (await snapshotResponse.json()) as SessionReviewSnapshot;
+      const assignments = snapshot.clinical_pipeline?.role_assignment?.assignments;
+      if (!assignments?.length) return;
+      setSpeakers(
+        assignments.map((assignment) => ({
+          id: assignment.speaker_id,
+          role: assignment.role,
+          status: assignment.status,
+          utterances: assignment.utterance_count,
+          sample: sampleForSpeaker(assignment.speaker_id, sourceUtterances),
+          reason: assignment.reason ?? undefined,
+        })),
+      );
+    } catch {
+      // Var olan role_review etiketlerini koru; başarısız hydrate için rol uydurma.
+    }
   }
 
   function updateSpeakerRole(id: string, role: Role) {
@@ -797,7 +843,12 @@ function ReviewPageContent() {
             <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-background/60 px-5 py-5">
               {utterances.length ? (
                 utterances.map((utterance, index) => (
-                  <TranscriptBubble key={`${utterance.speaker_id}-${index}`} speaker={utterance.speaker_id} text={utterance.text} />
+                  <TranscriptBubble
+                    key={`${utterance.speaker_id}-${index}`}
+                    speaker={utterance.speaker_id}
+                    text={utterance.text}
+                    assignment={speakerAssignmentsById.get(utterance.speaker_id)}
+                  />
                 ))
               ) : (
                 <EmptyListeningBubble />
@@ -1602,19 +1653,31 @@ function TranscriptReviewPanel({ transcriptText }: { transcriptText: string }) {
   );
 }
 
-function TranscriptBubble({ speaker, text }: { speaker: string; text: string }) {
-  const normalized = speaker.trim().toUpperCase();
-  const isDentistLike = normalized === "A" || normalized.includes("HEK");
-  const align = isDentistLike ? "items-start" : "items-end";
-  const label = isDentistLike ? "HEKİM" : normalized === "B" ? "HASTA" : `KONUŞMACI ${speaker}`;
-  const labelSpacing = isDentistLike ? "ml-4" : "mr-4";
-  const bubbleClass = isDentistLike
+function TranscriptBubble({ speaker, text, assignment }: { speaker: string; text: string; assignment?: Speaker }) {
+  const role = assignment?.role;
+  const isUncertain = Boolean(assignment && (assignment.status !== "clear" || role === "unknown"));
+  const align = role === "patient" ? "items-end" : "items-start";
+  const labelSpacing = role === "patient" ? "mr-4" : "ml-4";
+  const baseLabel = role === "dentist"
+    ? "HEKİM"
+    : role === "patient"
+      ? "HASTA"
+      : role === "assistant_or_other"
+        ? "ASİSTAN/DİĞER"
+        : `KONUŞMACI ${speaker}`;
+  const label = isUncertain && role !== "unknown" ? `${baseLabel}?` : baseLabel;
+  const bubbleClass = role === "dentist"
     ? "rounded-tl-none bg-primary text-primary-foreground"
-    : "rounded-tr-none bg-secondary text-foreground";
+    : role === "patient"
+      ? "rounded-tr-none bg-secondary text-foreground"
+      : "rounded-tl-none border border-border bg-card text-foreground";
 
   return (
     <div className={`flex flex-col ${align}`}>
-      <span className={`mb-1 text-[10px] font-bold text-primary ${labelSpacing}`}>{label}</span>
+      <span className={`mb-1 flex items-center gap-1 text-[10px] font-bold ${isUncertain ? "text-amber-700" : "text-primary"} ${labelSpacing}`}>
+        {isUncertain ? <AlertTriangle className="size-3" aria-hidden="true" /> : null}
+        {label}
+      </span>
       <div className={`max-w-md rounded-2xl p-4 shadow-card ${bubbleClass}`}>
         <p className="text-sm leading-6">{text}</p>
       </div>

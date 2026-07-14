@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -152,6 +153,91 @@ class ChatResponse(BaseModel):
 class PerioDictationRequest(BaseModel):
     dictation: str
     patient_id: Optional[str] = None
+
+
+class PerioExportPayload(BaseModel):
+    session_id: str
+    perio_text: str
+    audit: dict
+    warning: str
+
+
+class PerioApprovalResponse(BaseModel):
+    session_id: str
+    status: str
+    review_state: str
+    export_payload: PerioExportPayload
+
+
+_PERIO_EXPORT_SITE_ORDER = ("DB", "B", "MB", "DL", "L", "ML")
+
+
+def _format_perio_export(result: PerioSessionResult) -> str:
+    measurements_by_tooth: dict[int, dict[str, object]] = {}
+    for measurement in result.measurements:
+        measurements_by_tooth.setdefault(measurement.tooth_number_fdi, {})[
+            measurement.site.value
+        ] = measurement
+    summaries = {summary.tooth_number_fdi: summary for summary in result.tooth_summaries}
+    tooth_numbers = sorted(set(measurements_by_tooth) | set(summaries))
+
+    lines: list[str] = []
+    for tooth_number in tooth_numbers:
+        sites = measurements_by_tooth.get(tooth_number, {})
+
+        def metric(field: str, *, suffix: str = "") -> str:
+            values: list[str] = []
+            for site in _PERIO_EXPORT_SITE_ORDER:
+                measurement = sites.get(site)
+                value = getattr(measurement, field, None) if measurement is not None else None
+                values.append(f"{site}={'—' if value is None else f'{value}{suffix}'}")
+            return " ".join(values)
+
+        def flag(field: str) -> str:
+            values: list[str] = []
+            for site in _PERIO_EXPORT_SITE_ORDER:
+                measurement = sites.get(site)
+                value = getattr(measurement, field, None) if measurement is not None else None
+                symbol = "—" if value is None else "+" if value else "-"
+                values.append(f"{site}={symbol}")
+            return " ".join(values)
+
+        summary = summaries.get(tooth_number)
+        mobility = summary.mobility_grade if summary is not None else None
+        furcation_grade = summary.furcation_grade if summary is not None else None
+        furcation_site = summary.furcation_site if summary is not None else None
+        furcation = "—" if furcation_grade is None else str(furcation_grade)
+        if furcation_site:
+            furcation = f"{furcation} ({furcation_site})"
+        lines.append(
+            f"FDI {tooth_number}: Cep: {metric('pocket_depth_mm', suffix='mm')}; "
+            f"Kanama: {flag('bleeding_on_probing')}; Plak: {flag('plaque')}; "
+            f"Attachment: {metric('attachment_level_mm', suffix='mm')}; "
+            f"Mobilite: {'—' if mobility is None else mobility}; Furkasyon: {furcation}"
+        )
+
+    if result.uncertain_items:
+        lines.extend(["", "Kontrol Edilmeli:"])
+        lines.extend(f"- {item}" for item in result.uncertain_items)
+    return "\n".join(lines)
+
+
+def _load_perio_review(
+    repository: SessionRepository,
+    session_id: str,
+    *,
+    clinic_id: str,
+) -> tuple[object, dict, PerioSessionResult]:
+    session = repository.latest_session(session_id, clinic_id=clinic_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session bulunamadı.")
+    if session.session_type != "perio":
+        raise HTTPException(status_code=409, detail="Bu session bir perio seansı değil.")
+    snapshot = repository.get_review_snapshot(session_id, clinic_id=clinic_id)
+    perio_payload = snapshot.get("perio_result") if snapshot else None
+    if perio_payload is None:
+        raise HTTPException(status_code=409, detail="Onaylanacak perio taslağı bulunamadı.")
+    return session, snapshot, PerioSessionResult.model_validate(perio_payload)
 
 
 def _transcript_snapshot(result) -> list[dict]:
@@ -389,6 +475,87 @@ def extract_perio_session_endpoint(
         clinic_id=auth.clinic_id,
     )
     return result
+
+
+@router.post("/{session_id}/perio/approve", response_model=PerioApprovalResponse)
+def approve_perio_session_endpoint(
+    session_id: str,
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> PerioApprovalResponse:
+    session, snapshot, result = _load_perio_review(
+        repository, session_id, clinic_id=auth.clinic_id
+    )
+    existing_approval = snapshot.get("perio_approval")
+    if session.status == "approved" and existing_approval:
+        return PerioApprovalResponse.model_validate(existing_approval)
+
+    approved_at = datetime.now(timezone.utc).isoformat()
+    export_payload = PerioExportPayload(
+        session_id=session_id,
+        perio_text=_format_perio_export(result),
+        audit={
+            "action": "perio_approved",
+            "reviewer_user_id": auth.user_id,
+            "approved": True,
+            "created_at_utc": approved_at,
+            "source": "dentist",
+        },
+        warning="Hekim tarafından onaylanmış periodontal kayıt çıktısıdır.",
+    )
+    response = PerioApprovalResponse(
+        session_id=session_id,
+        status="approved",
+        review_state="approved",
+        export_payload=export_payload,
+    )
+    repository.upsert_session(
+        session_id,
+        status="approved",
+        current_stage="ready_for_export",
+        clinic_id=auth.clinic_id,
+        dentist_id=auth.user_id,
+        patient_id=session.patient_id,
+        session_type="perio",
+    )
+    repository.add_audit_log(
+        user_id=auth.user_id,
+        session_id=session_id,
+        clinic_id=auth.clinic_id,
+        action="perio_approved",
+        entity_type="perio_session_result",
+        entity_id=session_id,
+        source="dentist",
+        metadata_json={
+            "measurement_count": len(result.measurements),
+            "tooth_summary_count": len(result.tooth_summaries),
+            "approved_at_utc": approved_at,
+        },
+    )
+    updated_snapshot = {
+        **snapshot,
+        "perio_approval": response.model_dump(mode="json"),
+    }
+    repository.save_review_snapshot(session_id, updated_snapshot, clinic_id=auth.clinic_id)
+    return response
+
+
+@router.get("/{session_id}/perio/export", response_model=PerioExportPayload)
+def export_perio_session_endpoint(
+    session_id: str,
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> PerioExportPayload:
+    session, snapshot, _ = _load_perio_review(
+        repository, session_id, clinic_id=auth.clinic_id
+    )
+    approval = snapshot.get("perio_approval")
+    if session.status != "approved" or not approval:
+        raise HTTPException(
+            status_code=409,
+            detail="Perio taslağı hekim tarafından onaylanmadan export edilemez.",
+        )
+    return PerioApprovalResponse.model_validate(approval).export_payload
 
 
 @router.post("/{session_id}/resume-role-review", response_model=PipelineReviewResponse)
