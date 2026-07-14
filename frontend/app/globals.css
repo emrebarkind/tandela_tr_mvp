@@ -131,6 +131,7 @@ textarea:focus-visible {
     --accent: #E8EDE8;
     --accent-foreground: #202422;
     --destructive: #DC4F49;
+    --warning: #E49545;
     --border: #DDE3E0;
     --input: #DDE3E0;
     --ring: #4A7C63;

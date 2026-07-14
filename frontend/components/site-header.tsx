@@ -71,6 +71,6 @@ function routeTitle(pathname: string) {
 }
 
 function defaultSubtitle(pathname: string) {
-  if (pathname.startsWith("/session/")) return "Hasta: Demo Danışan · Bugünkü görüşme";
+  if (pathname.startsWith("/session/")) return "Görüşme ayrıntıları yükleniyor";
   return "Tandela TR";
 }

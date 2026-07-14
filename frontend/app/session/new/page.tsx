@@ -10,6 +10,7 @@ import { DentalChartPanel } from "@/components/review/DentalChartPanel";
 import { LiveTranscriptRecorder } from "@/components/review/LiveTranscriptRecorder";
 import { TranscriptDrawer } from "@/components/review/TranscriptDrawer";
 import { Badge } from "@/components/ui/badge";
+import { DraftBadge } from "@/components/ui/draft-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -249,7 +250,6 @@ function ReviewPageContent() {
   const searchParams = useSearchParams();
   const { clearHeader, setHeader } = useHeader();
   const [sessionId] = useState(() => createSessionId());
-  const [patientName] = useState("Demo Danışan");
   const [encounterAt] = useState(() => toDatetimeLocalValue(new Date()));
   const [transcriptText, setTranscriptText] = useState("");
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
@@ -275,6 +275,7 @@ function ReviewPageContent() {
   const [patients, setPatients] = useState<PatientSummary[]>([]);
   const [patientId, setPatientId] = useState(() => searchParams.get("patient_id") ?? "");
   const [perioDictation, setPerioDictation] = useState("");
+  const patientName = patientId ? patientLabel(patients.find((patient) => patient.id === patientId)) : "Yeni Görüşme";
 
   const utterances = useMemo(() => parseTranscript(transcriptText), [transcriptText]);
   const transcriptDiagnostics = useMemo(() => inspectTranscript(transcriptText), [transcriptText]);
@@ -323,7 +324,7 @@ function ReviewPageContent() {
   }, []);
 
   useEffect(() => {
-    if (!hasAnalysisDraft || !displayedNote || approved) {
+    if (approved) {
       clearHeader();
       return;
     }
@@ -331,12 +332,8 @@ function ReviewPageContent() {
     setHeader({
       title: patientName.trim() || "Yeni Görüşme",
       subtitle: formatEncounterDate(encounterAt),
-      badge: (
-        <Badge className="rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-foreground hover:bg-secondary">
-          Taslak · Hekim onayı gereklidir
-        </Badge>
-      ),
-      actions: (
+      badge: <DraftBadge />,
+      actions: hasAnalysisDraft && displayedNote ? (
         <div className="flex flex-wrap items-center gap-2">
           <Button
             type="button"
@@ -363,7 +360,7 @@ function ReviewPageContent() {
             Onayla ve Kaydet
           </Button>
         </div>
-      ),
+      ) : undefined,
     });
 
     return () => clearHeader();
@@ -702,15 +699,16 @@ function ReviewPageContent() {
   if (sessionMode === "perio") {
     return (
       <main className="min-h-[calc(100vh-4rem)] bg-background p-4 md:p-6">
-        <div className="mx-auto max-w-3xl space-y-5">
+        <div className="mx-auto w-full max-w-[1680px] space-y-5">
           <SessionModeSelector mode={sessionMode} onChange={setSessionMode} />
-          <Card className="border-border bg-card shadow-panel">
-            <CardHeader>
-              <p className="text-xs font-semibold uppercase text-muted-foreground">Yeni Perio Seansı</p>
-              <CardTitle className="font-heading text-2xl">Periodontal Dikte</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-5">
-              <div>
+          <section className="grid min-h-[720px] overflow-hidden rounded-[32px] border border-border bg-card shadow-panel lg:grid-cols-[minmax(320px,0.44fr)_minmax(420px,0.56fr)]">
+            <div className="border-b border-border p-6 lg:border-b-0 lg:border-r">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Yeni Perio Seansı</p>
+              <h1 className="mt-2 font-heading text-2xl font-semibold tracking-tight">Periodontal Dikte</h1>
+              <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+                Altı nokta ölçümlerini dikte edin; analiz kayıt tamamlandıktan sonra batch çalışır.
+              </p>
+              <div className="mt-8">
                 <label className="mb-2 block text-sm font-semibold">Hasta</label>
                 <Select value={patientId} onValueChange={(value) => setPatientId(value ?? "")}>
                   <SelectTrigger className="h-11 w-full border-border bg-background">
@@ -723,25 +721,30 @@ function ReviewPageContent() {
                   </SelectContent>
                 </Select>
               </div>
-              <div>
-                <label className="mb-2 block text-sm font-semibold" htmlFor="perio-dictation">Dikte</label>
-                <Textarea
-                  id="perio-dictation"
-                  value={perioDictation}
-                  onChange={(event) => setPerioDictation(event.target.value)}
-                  placeholder="Örn. 16 bukkal üç dört dört, mobilite bir, furkasyon iki bukkal."
-                  className="min-h-44 border-border bg-background"
-                />
+            </div>
+            <div className="flex min-h-0 flex-col bg-background/60 p-6">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Dikte</p>
+                  <h2 className="mt-2 font-heading text-xl font-semibold">Perio ölçümlerini girin</h2>
+                </div>
               </div>
-              {error ? <p className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
-              <div className="flex justify-end">
-                <Button onClick={() => void analyzePerioDictation()} disabled={isLoading || !patientId || !perioDictation.trim()}>
+              <Textarea
+                id="perio-dictation"
+                value={perioDictation}
+                onChange={(event) => setPerioDictation(event.target.value)}
+                placeholder="Örn. 16 bukkal üç dört dört, mobilite bir, furkasyon iki bukkal."
+                className="mt-6 min-h-[360px] flex-1 resize-y rounded-2xl border-border bg-card text-sm leading-6"
+              />
+              {error ? <p className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+              <div className="mt-5 flex justify-end">
+                <Button className="h-11 px-5" onClick={() => void analyzePerioDictation()} disabled={isLoading || !patientId || !perioDictation.trim()}>
                   {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <ClipboardCheck className="mr-2 size-4" />}
                   Analiz Et
                 </Button>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </section>
         </div>
       </main>
     );
@@ -823,9 +826,6 @@ function ReviewPageContent() {
                 Sonuçlar backend tamamlandıktan sonra bölüm bölüm gösterilir.
               </p>
             </div>
-            <Badge className="rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-foreground hover:bg-secondary">
-              Taslak · Hekim onayı gereklidir
-            </Badge>
           </div>
 
           <div className="h-[calc(100%-97px)] overflow-y-auto p-5">
@@ -1733,9 +1733,6 @@ function EmptyClinicalNote() {
             <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Klinik Not Taslağı</p>
             <CardTitle className="mt-3 text-3xl font-semibold tracking-tight">Kapsamlı Muayene</CardTitle>
           </div>
-          <Badge className="rounded-full bg-secondary px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary">
-            Taslak · Hekim onayı gereklidir
-          </Badge>
         </div>
       </CardHeader>
       <CardContent className="flex min-h-[590px] items-center justify-center p-10">

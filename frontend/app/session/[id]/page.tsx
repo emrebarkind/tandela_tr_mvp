@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Loader2, Save, X } from "lucide-react";
 import { useHeader } from "@/components/app/HeaderContext";
 import { ApprovedExport } from "@/components/review/ApprovedExport";
@@ -13,8 +14,10 @@ import { TranscriptInput } from "@/components/review/TranscriptInput";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DraftBadge } from "@/components/ui/draft-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { fetchPatientSessions } from "@/lib/patients-api";
 
 type Role = "dentist" | "patient" | "assistant_or_other" | "unknown";
 type SpeakerStatus = "clear" | "review_needed" | "unresolved";
@@ -146,7 +149,9 @@ type PipelineReviewResponse = {
 };
 
 type SessionMetadata = {
+  patient_id?: string | null;
   session_type?: "clinical_note" | "perio";
+  started_at?: string | null;
 };
 
 type SessionReviewSnapshot = {
@@ -198,10 +203,12 @@ const AUTH_HEADERS = {
 const transcriptLinePattern = /^([A-Za-zÇĞİÖŞÜçğıöşü0-9_-]+)\s*:\s*(.+)$/;
 
 export default function ReviewPage({ params }: { params: { id: string } }) {
+  const router = useRouter();
   const { clearHeader, setHeader } = useHeader();
   const [sessionId] = useState(params.id);
-  const [patientName] = useState("Demo Danışan");
-  const [encounterAt] = useState(() => toDatetimeLocalValue(new Date()));
+  const [patientName, setPatientName] = useState("Yeni Görüşme");
+  const [patientId, setPatientId] = useState<string | null>(null);
+  const [encounterAt, setEncounterAt] = useState(() => toDatetimeLocalValue(new Date()));
   const [transcriptText, setTranscriptText] = useState("");
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
   const [selectedCode, setSelectedCode] = useState("");
@@ -229,21 +236,23 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
 
   useEffect(() => {
     let active = true;
-    fetch(`${API_BASE}/sessions/${sessionId}/review`, { headers: AUTH_HEADERS })
-      .then(async (reviewResponse) => {
-        if (reviewResponse.ok) {
-          return { snapshot: (await reviewResponse.json()) as SessionReviewSnapshot, metadata: null };
-        }
-        const metadataResponse = await fetch(`${API_BASE}/sessions/${sessionId}`, { headers: AUTH_HEADERS });
-        return {
-          snapshot: null,
-          metadata: metadataResponse.ok ? ((await metadataResponse.json()) as SessionMetadata) : null,
-        };
+    Promise.all([
+      fetch(`${API_BASE}/sessions/${sessionId}/review`, { headers: AUTH_HEADERS }),
+      fetch(`${API_BASE}/sessions/${sessionId}`, { headers: AUTH_HEADERS }),
+    ])
+      .then(async ([reviewResponse, metadataResponse]) => {
+        const snapshot = reviewResponse.ok ? ((await reviewResponse.json()) as SessionReviewSnapshot) : null;
+        const metadata = metadataResponse.ok ? ((await metadataResponse.json()) as SessionMetadata) : null;
+        const patient = metadata?.patient_id ? await fetchPatientSessions(metadata.patient_id).catch(() => null) : null;
+        return { snapshot, metadata, patient };
       })
-      .then(({ snapshot, metadata }) => {
+      .then(({ snapshot, metadata, patient }) => {
         if (!active) return;
         const nextSessionType = snapshot?.session_type ?? metadata?.session_type ?? "clinical_note";
         setSessionType(nextSessionType);
+        setPatientId(metadata?.patient_id ?? null);
+        setPatientName(patient ? displayPatientHeader(patient.initials, patient.external_id) : "Yeni Görüşme");
+        if (metadata?.started_at) setEncounterAt(toDatetimeLocalValue(new Date(metadata.started_at)));
         if (!snapshot) return;
 
         const snapshotUtterances = snapshot.transcript ?? [];
@@ -280,7 +289,8 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   }, [sessionId]);
 
   useEffect(() => {
-    if (!hasAnalysisDraft || !displayedNote || approved) {
+    const hasPerioDraft = sessionType === "perio" && Boolean(persistedPerioResult);
+    if ((!hasAnalysisDraft && !hasPerioDraft) || approved) {
       clearHeader();
       return;
     }
@@ -288,11 +298,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     setHeader({
       title: patientName.trim() || "Yeni Görüşme",
       subtitle: formatEncounterDate(encounterAt),
-      badge: (
-        <Badge className="rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-foreground hover:bg-secondary">
-          Taslak · Hekim onayı gereklidir
-        </Badge>
-      ),
+      badge: <DraftBadge />,
       actions: (
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -300,6 +306,10 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
             variant="ghost"
             className="h-10 rounded-lg px-4 text-muted-foreground hover:bg-muted"
             onClick={() => {
+              if (sessionType === "perio") {
+                router.push(patientId ? `/patients/${encodeURIComponent(patientId)}` : "/");
+                return;
+              }
               setResponse(null);
               setEditableNote(null);
               setApproved(false);
@@ -313,7 +323,8 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
             type="button"
             className="h-10 rounded-lg bg-primary px-5 font-semibold text-primary-foreground hover:bg-primary/80"
             onClick={() => void approveClinicalReview()}
-            disabled={isLoading || !displayedNote}
+            disabled={isLoading || sessionType === "perio" || !displayedNote}
+            title={sessionType === "perio" ? "Perio onayı bu görsel turda backend değişikliği yapılmadığı için pasiftir." : undefined}
           >
             {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
             Onayla ve Kaydet
@@ -323,7 +334,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     });
 
     return () => clearHeader();
-  }, [approved, clearHeader, displayedNote, encounterAt, hasAnalysisDraft, isLoading, patientName, setHeader]);
+  }, [approved, clearHeader, displayedNote, encounterAt, hasAnalysisDraft, isLoading, patientId, patientName, persistedPerioResult, router, sessionType, setHeader]);
 
   async function runTranscriptAnalysis(sourceUtterances: TranscriptUtterance[]) {
     return postReviewResponse("/sessions", {
@@ -740,4 +751,9 @@ function formatEncounterDate(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(parsed);
+}
+
+function displayPatientHeader(initials: string | null, externalId: string | null) {
+  const name = initials?.trim() || "İsimsiz hasta";
+  return externalId?.trim() ? `${name} · ${externalId.trim()}` : name;
 }

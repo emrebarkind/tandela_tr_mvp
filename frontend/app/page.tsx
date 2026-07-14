@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { DraftBadge } from "@/components/ui/draft-badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
@@ -173,7 +174,7 @@ function ProcedureSummary({ procedures }: { procedures: string[] }) {
 function StatusBadge({ status }: { status: string }) {
   if (status === "approved" || status === "exported") return <Badge className="rounded-lg bg-emerald-100 text-emerald-900 hover:bg-emerald-100">Onaylı</Badge>;
   if (status === "no_sessions") return <Badge variant="secondary" className="rounded-lg">Yeni</Badge>;
-  return <Badge className="rounded-lg bg-amber-100 text-amber-900 hover:bg-amber-100">Taslak</Badge>;
+  return <DraftBadge compact />;
 }
 
 function formatDate(value: string | null) {
