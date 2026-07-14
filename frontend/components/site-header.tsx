@@ -14,13 +14,15 @@ export function SiteHeader() {
     <header className="sticky top-0 z-30 flex min-h-16 shrink-0 items-center border-b border-border bg-secondary/80 backdrop-blur-md">
       <div className="flex w-full items-center justify-between gap-3 px-4 lg:px-6">
         <div className="flex min-w-0 items-center gap-4">
-          <Link
-            href="/"
-            className="grid size-10 shrink-0 place-items-center rounded-full text-muted-foreground transition hover:bg-muted"
-            aria-label="Geri dön"
-          >
-            <ArrowLeft className="size-5" aria-hidden="true" />
-          </Link>
+          {pathname === "/" ? null : (
+            <Link
+              href="/"
+              className="grid size-10 shrink-0 place-items-center rounded-full text-muted-foreground transition hover:bg-muted"
+              aria-label="Geri dön"
+            >
+              <ArrowLeft className="size-5" aria-hidden="true" />
+            </Link>
+          )}
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="truncate text-lg font-semibold tracking-tight text-foreground">

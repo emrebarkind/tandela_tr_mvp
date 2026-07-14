@@ -35,13 +35,14 @@ from app.api.session_pipeline import (
     patch_session_speaker_role,
     resume_session_after_role_review,
     resume_transcript_after_role_review,
+    restore_session_result,
     to_review_response,
 )
 from app.db import create_database_engine, create_session_factory, init_database
 from app.prompts.loader import load_system_prompt
 from app.providers.llm import LLMProvider
 from app.pipeline.orchestrator import run_perio_pipeline
-from app.pipeline.types import PerioSessionResult
+from app.pipeline.types import PerioSessionResult, PipelineResult
 from app.providers.audio_processing import (
     AudioProcessingProvider,
     AudioProviderConfigurationError,
@@ -123,6 +124,7 @@ class PatientSummaryResponse(BaseModel):
 class PatientSessionSummaryResponse(BaseModel):
     id: str
     status: str
+    session_type: str
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     procedures: list[str]
@@ -149,6 +151,49 @@ class ChatResponse(BaseModel):
 
 class PerioDictationRequest(BaseModel):
     dictation: str
+    patient_id: Optional[str] = None
+
+
+def _transcript_snapshot(result) -> list[dict]:
+    if result.speaker_labelled_transcript is None:
+        return []
+    return [utterance.model_dump(mode="json") for utterance in result.speaker_labelled_transcript.utterances]
+
+
+def _save_clinical_review_snapshot(
+    repository: SessionRepository,
+    result,
+    *,
+    clinic_id: str,
+    response: Optional[PipelineReviewResponse] = None,
+) -> PipelineReviewResponse:
+    review = response or to_review_response(result)
+    repository.save_review_snapshot(
+        result.session_id,
+        {
+            "snapshot_version": 1,
+            "session_id": result.session_id,
+            "session_type": "clinical_note",
+            "transcript": _transcript_snapshot(result),
+            "clinical_review": review.model_dump(mode="json"),
+            "clinical_pipeline": result.model_dump(mode="json"),
+            "perio_result": None,
+        },
+        clinic_id=clinic_id,
+    )
+    return review
+
+
+def _restore_clinical_review_state(
+    repository: SessionRepository,
+    session_id: str,
+    *,
+    clinic_id: str,
+) -> None:
+    snapshot = repository.get_review_snapshot(session_id, clinic_id=clinic_id)
+    pipeline_payload = snapshot.get("clinical_pipeline") if snapshot else None
+    if pipeline_payload:
+        restore_session_result(PipelineResult.model_validate(pipeline_payload))
 
 
 @auth_router.post("/login", response_model=LoginResponse)
@@ -233,13 +278,29 @@ def create_session_endpoint(
         result = create_session_from_transcript(request, llm_provider)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    repository.save_pipeline_result(
-        result,
-        clinic_id=auth.clinic_id,
-        actor_user_id=auth.user_id,
-        transcript_source="manual_transcript",
-    )
-    return to_review_response(result)
+    try:
+        repository.save_pipeline_result(
+            result,
+            clinic_id=auth.clinic_id,
+            actor_user_id=auth.user_id,
+            transcript_source="manual_transcript",
+            patient_id=request.patient_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _save_clinical_review_snapshot(repository, result, clinic_id=auth.clinic_id)
+
+
+@router.get("/{session_id}/review")
+def get_session_review_endpoint(
+    session_id: str,
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    snapshot = repository.get_review_snapshot(session_id, clinic_id=auth.clinic_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Session review snapshot bulunamadı.")
+    return snapshot
 
 
 @router.get("/{session_id}")
@@ -262,6 +323,23 @@ def extract_perio_session_endpoint(
     repository: SessionRepository = Depends(get_session_repository),
     auth: AuthContext = Depends(get_auth_context),
 ) -> PerioSessionResult:
+    existing_session = repository.latest_session(session_id, clinic_id=auth.clinic_id)
+    patient_id = request.patient_id or (existing_session.patient_id if existing_session else None)
+    if not patient_id:
+        raise HTTPException(status_code=400, detail="Perio seansı için patient_id gerekli.")
+    try:
+        repository.upsert_session(
+            session_id,
+            status="draft",
+            current_stage="transcript",
+            clinic_id=auth.clinic_id,
+            dentist_id=auth.user_id,
+            patient_id=patient_id,
+            session_type="perio",
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     try:
         result = run_perio_pipeline(request.dictation, llm_provider)
     except (ValueError, json.JSONDecodeError) as exc:
@@ -280,6 +358,7 @@ def extract_perio_session_endpoint(
         current_stage="perio_review",
         clinic_id=auth.clinic_id,
         dentist_id=auth.user_id,
+        patient_id=patient_id,
         session_type="perio",
     )
     repository.add_audit_log(
@@ -296,6 +375,19 @@ def extract_perio_session_endpoint(
             "uncertain_item_count": len(result.uncertain_items),
         },
     )
+    repository.save_review_snapshot(
+        session_id,
+        {
+            "snapshot_version": 1,
+            "session_id": session_id,
+            "session_type": "perio",
+            "transcript": [{"speaker_id": "dentist", "text": request.dictation.strip()}],
+            "clinical_review": None,
+            "clinical_pipeline": None,
+            "perio_result": result.model_dump(mode="json"),
+        },
+        clinic_id=auth.clinic_id,
+    )
     return result
 
 
@@ -307,6 +399,7 @@ def resume_session_role_review_endpoint(
     repository: SessionRepository = Depends(get_session_repository),
     auth: AuthContext = Depends(get_auth_context),
 ) -> PipelineReviewResponse:
+    _restore_clinical_review_state(repository, session_id, clinic_id=auth.clinic_id)
     try:
         result = resume_session_after_role_review(session_id, request, llm_provider)
     except KeyError as exc:
@@ -319,7 +412,7 @@ def resume_session_role_review_endpoint(
         actor_user_id=auth.user_id,
         transcript_source="role_reviewed_transcript",
     )
-    return to_review_response(result)
+    return _save_clinical_review_snapshot(repository, result, clinic_id=auth.clinic_id)
 
 
 @router.patch("/{session_id}/speaker-role", response_model=PipelineReviewResponse)
@@ -330,6 +423,7 @@ def patch_session_speaker_role_endpoint(
     repository: SessionRepository = Depends(get_session_repository),
     auth: AuthContext = Depends(get_auth_context),
 ) -> PipelineReviewResponse:
+    _restore_clinical_review_state(repository, session_id, clinic_id=auth.clinic_id)
     try:
         result = patch_session_speaker_role(session_id, request, llm_provider)
     except KeyError as exc:
@@ -342,7 +436,7 @@ def patch_session_speaker_role_endpoint(
         actor_user_id=auth.user_id,
         transcript_source="speaker_role_patch",
     )
-    return to_review_response(result)
+    return _save_clinical_review_snapshot(repository, result, clinic_id=auth.clinic_id)
 
 
 @router.post("/{session_id}/findings", response_model=PipelineReviewResponse)
@@ -352,6 +446,7 @@ def add_manual_finding_endpoint(
     repository: SessionRepository = Depends(get_session_repository),
     auth: AuthContext = Depends(get_auth_context),
 ) -> PipelineReviewResponse:
+    _restore_clinical_review_state(repository, session_id, clinic_id=auth.clinic_id)
     try:
         result = add_manual_finding_to_session(session_id, request)
     except KeyError as exc:
@@ -368,7 +463,7 @@ def add_manual_finding_endpoint(
         source="manual",
         metadata_json=request.model_dump(mode="json"),
     )
-    return to_review_response(result)
+    return _save_clinical_review_snapshot(repository, result, clinic_id=auth.clinic_id)
 
 
 @router.post("/transcripts/analyze", response_model=PipelineReviewResponse)
@@ -401,7 +496,9 @@ def analyze_transcript_endpoint(
             clinic_id=auth.clinic_id,
             actor_user_id=auth.user_id,
         )
-    return response
+    return _save_clinical_review_snapshot(
+        repository, result, clinic_id=auth.clinic_id, response=response
+    )
 
 
 @router.post("/transcripts/resume-after-role-review", response_model=PipelineReviewResponse)
@@ -434,7 +531,9 @@ def resume_after_role_review_endpoint(
             clinic_id=auth.clinic_id,
             actor_user_id=auth.user_id,
         )
-    return response
+    return _save_clinical_review_snapshot(
+        repository, result, clinic_id=auth.clinic_id, response=response
+    )
 
 
 @router.post("/reviews/approve", response_model=PipelineReviewResponse)
@@ -473,6 +572,7 @@ def approve_session_endpoint(
     auth: AuthContext = Depends(get_auth_context),
 ) -> PipelineReviewResponse:
     trusted_request = request.model_copy(update={"reviewer_user_id": auth.user_id})
+    _restore_clinical_review_state(repository, session_id, clinic_id=auth.clinic_id)
     try:
         result = approve_session_review(session_id, trusted_request)
     except KeyError as exc:
@@ -496,13 +596,16 @@ def approve_session_endpoint(
         export_payload=response.export_payload,
         clinic_id=auth.clinic_id,
     )
-    return response
+    return _save_clinical_review_snapshot(
+        repository, result, clinic_id=auth.clinic_id, response=response
+    )
 
 
 @router.post("/{session_id}/audio", response_model=PipelineReviewResponse)
 def session_audio_endpoint(
     session_id: str,
     audio: UploadFile = File(...),
+    patient_id: Optional[str] = Form(default=None),
     audio_provider: AudioProcessingProvider = Depends(get_audio_processing_provider),
     llm_provider: LLMProvider = Depends(get_llm_provider),
     repository: SessionRepository = Depends(get_session_repository),
@@ -525,6 +628,7 @@ def session_audio_endpoint(
 
     request = TranscriptAnalyzeRequest(
         session_id=session_id,
+        patient_id=patient_id,
         utterances=[
             {
                 "speaker_id": utterance.speaker_id,
@@ -541,8 +645,12 @@ def session_audio_endpoint(
         clinic_id=auth.clinic_id,
         actor_user_id=auth.user_id,
         transcript_source="audio",
+        patient_id=patient_id,
     )
-    return to_review_response(result).model_copy(update={"audio_processing": audio_out})
+    response = to_review_response(result).model_copy(update={"audio_processing": audio_out})
+    return _save_clinical_review_snapshot(
+        repository, result, clinic_id=auth.clinic_id, response=response
+    )
 
 
 @router.post("/audio/process", response_model=AudioProcessResponse)

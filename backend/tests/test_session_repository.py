@@ -212,6 +212,35 @@ class SessionRepositoryTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_review_snapshot_survives_new_database_session_and_is_clinic_scoped(self) -> None:
+        db = self.session_factory()
+        try:
+            repo = SessionRepository(db)
+            repo.upsert_session("snapshot-s1", status="draft", clinic_id="clinic-1")
+            repo.save_review_snapshot(
+                "snapshot-s1",
+                {
+                    "snapshot_version": 1,
+                    "session_id": "snapshot-s1",
+                    "session_type": "clinical_note",
+                    "clinical_review": {"next_action": "review_note_and_codes"},
+                },
+                clinic_id="clinic-1",
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        reopened = self.session_factory()
+        try:
+            repo = SessionRepository(reopened)
+            snapshot = repo.get_review_snapshot("snapshot-s1", clinic_id="clinic-1")
+            self.assertIsNotNone(snapshot)
+            self.assertEqual(snapshot["clinical_review"]["next_action"], "review_note_and_codes")
+            self.assertIsNone(repo.get_review_snapshot("snapshot-s1", clinic_id="other-clinic"))
+        finally:
+            reopened.close()
+
 
 if __name__ == "__main__":
     unittest.main()

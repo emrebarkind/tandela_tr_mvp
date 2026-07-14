@@ -62,6 +62,7 @@ class RoleCorrectionIn(BaseModel):
 
 class TranscriptAnalyzeRequest(BaseModel):
     session_id: Optional[str] = None
+    patient_id: Optional[str] = None
     transcript_text: Optional[str] = None
     utterances: list[TranscriptUtteranceIn] = Field(default_factory=list)
 
@@ -181,6 +182,11 @@ class PipelineReviewResponse(BaseModel):
 
 
 _SESSION_STORE: dict[str, SessionState] = {}
+
+
+def restore_session_result(result: PipelineResult) -> None:
+    """Rehydrate transient workflow state from the clinic-scoped DB snapshot."""
+    _store_session_result(result.session_id, result)
 
 
 def analyze_transcript(

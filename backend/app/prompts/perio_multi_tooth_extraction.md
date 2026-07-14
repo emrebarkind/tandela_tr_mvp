@@ -80,7 +80,10 @@ SITES AND VALUES:
   measurements.
 - `pocket_depth_mm`: only site-mapped `0-15` mm values.
 - `gingival_margin_mm`: only explicitly dictated; preserve a negative sign.
-- `recession_mm`: only explicitly dictated; never derive it.
+- `recession_mm`: only explicitly dictated; never derive it. Do not calculate
+  `gingival_margin_mm` from recession in the model output. After parsing, the
+  backend deterministically sets `gingival_margin_mm = -recession_mm`; when
+  both fields are present, the recession-derived value is authoritative.
 - `kanama var` / `BOP pozitif` -> `bleeding_on_probing=true`;
   `kanama yok` / `BOP negatif` -> `false`; otherwise omit the field.
 - `plak var` / `plak pozitif` -> `plaque=true`; `plak yok` /

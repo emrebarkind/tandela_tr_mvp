@@ -12,6 +12,7 @@ export type PatientSummary = {
 export type PatientSessionSummary = {
   id: string;
   status: string;
+  session_type: "clinical_note" | "perio";
   started_at: string | null;
   completed_at: string | null;
   procedures: string[];

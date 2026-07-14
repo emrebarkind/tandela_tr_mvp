@@ -69,6 +69,7 @@ class Session(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     current_stage: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    review_snapshot_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

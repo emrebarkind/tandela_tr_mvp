@@ -120,6 +120,9 @@ class SessionPipelineApiTests(unittest.TestCase):
         calls: list[tuple[str, dict]] = []
 
         class StubRepository:
+            def latest_session(self, session_id: str, **kwargs):
+                return None
+
             def upsert_session(self, session_id: str, **kwargs):
                 calls.append(("upsert_session", {"session_id": session_id, **kwargs}))
 
@@ -134,6 +137,14 @@ class SessionPipelineApiTests(unittest.TestCase):
             def add_audit_log(self, **kwargs):
                 calls.append(("add_audit_log", kwargs))
 
+            def save_review_snapshot(self, session_id: str, snapshot: dict, **kwargs):
+                calls.append(
+                    (
+                        "save_review_snapshot",
+                        {"session_id": session_id, "snapshot": snapshot, **kwargs},
+                    )
+                )
+
         app.dependency_overrides[get_llm_provider] = lambda: PerioScriptedLLM()
         app.dependency_overrides[get_session_repository] = lambda: StubRepository()
         client = TestClient(app)
@@ -142,6 +153,7 @@ class SessionPipelineApiTests(unittest.TestCase):
             "/sessions/perio-integration/perio",
             headers=AUTH_HEADERS,
             json={
+                "patient_id": "patient-perio",
                 "dictation": "16 bukkal üç dört dört, mobilite bir, furkasyon iki bukkal."
             },
         )
@@ -155,8 +167,14 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertEqual(payload["tooth_summaries"][0]["furcation_grade"], 2)
         self.assertEqual(payload["uncertain_items"], [])
 
-        upsert = next(data for name, data in calls if name == "upsert_session")
+        upsert = next(
+            data
+            for name, data in calls
+            if name == "upsert_session" and data.get("current_stage") == "perio_review"
+        )
         self.assertEqual(upsert["session_id"], "perio-integration")
+        self.assertEqual(upsert["patient_id"], "patient-perio")
+        self.assertEqual(upsert["session_type"], "perio")
         self.assertEqual(upsert["current_stage"], "perio_review")
         transcript = next(data for name, data in calls if name == "save_transcript")
         self.assertEqual(transcript["source"], "perio_dictation")
@@ -164,6 +182,32 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertEqual(audit["action"], "perio_extracted")
         self.assertEqual(audit["source"], "ai")
         self.assertNotIn("dictation", audit["metadata_json"])
+        snapshot = next(data for name, data in calls if name == "save_review_snapshot")
+        self.assertEqual(snapshot["snapshot"]["session_type"], "perio")
+        self.assertEqual(snapshot["snapshot"]["perio_result"]["tooth_summaries"][0]["mobility_grade"], 1)
+
+    def test_review_endpoint_returns_persisted_snapshot(self) -> None:
+        snapshot = {
+            "snapshot_version": 1,
+            "session_id": "persisted-review",
+            "session_type": "perio",
+            "transcript": [{"speaker_id": "dentist", "text": "16 bukkal üç dört dört."}],
+            "clinical_review": None,
+            "clinical_pipeline": None,
+            "perio_result": {"measurements": [], "tooth_summaries": [], "uncertain_items": []},
+        }
+
+        class StubRepository:
+            def get_review_snapshot(self, session_id: str, **kwargs):
+                return snapshot if session_id == "persisted-review" else None
+
+        app.dependency_overrides[get_session_repository] = lambda: StubRepository()
+        client = TestClient(app)
+
+        response = client.get("/sessions/persisted-review/review", headers=AUTH_HEADERS)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), snapshot)
 
     def test_analyze_transcript_marks_role_review_but_continues_to_draft(self) -> None:
         request = TranscriptAnalyzeRequest(

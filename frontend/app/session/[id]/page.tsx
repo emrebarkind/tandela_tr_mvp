@@ -7,6 +7,7 @@ import { ApprovedExport } from "@/components/review/ApprovedExport";
 import { CodeSuggestionsPanel } from "@/components/review/CodeSuggestionsPanel";
 import { DentalChartPanel } from "@/components/review/DentalChartPanel";
 import { NoteDocument } from "@/components/review/NoteDocument";
+import { PerioChartPanel, type PerioSessionResult } from "@/components/review/PerioChartPanel";
 import { TranscriptDrawer } from "@/components/review/TranscriptDrawer";
 import { TranscriptInput } from "@/components/review/TranscriptInput";
 import { Badge } from "@/components/ui/badge";
@@ -144,6 +145,19 @@ type PipelineReviewResponse = {
   export_payload?: ExportPayload | null;
 };
 
+type SessionMetadata = {
+  session_type?: "clinical_note" | "perio";
+};
+
+type SessionReviewSnapshot = {
+  snapshot_version: number;
+  session_id: string;
+  session_type: "clinical_note" | "perio";
+  transcript: TranscriptUtterance[];
+  clinical_review?: PipelineReviewResponse | null;
+  perio_result?: PerioSessionResult | null;
+};
+
 type ExportPayload = {
   session_id: string;
   clinical_note_text: string;
@@ -181,15 +195,6 @@ const AUTH_HEADERS = {
   "X-Tandela-User-Role": process.env.NEXT_PUBLIC_TANDELA_USER_ROLE ?? "dentist",
 };
 
-const sampleTranscript = `A: Merhaba, şikayetiniz nedir?
-B: Sağ alt tarafta iki gündür ağrım var, özellikle yemek yerken zonkluyor.
-A: Ağzınızı açın lütfen. Sağ alt altıda, yani 46 numarada derin çürük görüyorum.
-C: Hocam röntgeni açıyorum.
-A: Perküsyonda hassasiyet var. Kanal tedavisi gerekebilir. Bugün geçici dolgu yapıp kanal tedavisi planlayalım.
-B: Benim dişim iltihaplı mı yani?
-A: Röntgene göre periapikal bölgede şüpheli bir görüntü var, kesin değerlendirme için endodontik muayeneyle ilerleyeceğiz.
-A: 46 numara için kanal tedavisi planlandı, geçici restorasyon yapılacak.`;
-
 const transcriptLinePattern = /^([A-Za-zÇĞİÖŞÜçğıöşü0-9_-]+)\s*:\s*(.+)$/;
 
 export default function ReviewPage({ params }: { params: { id: string } }) {
@@ -197,9 +202,9 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   const [sessionId] = useState(params.id);
   const [patientName] = useState("Demo Danışan");
   const [encounterAt] = useState(() => toDatetimeLocalValue(new Date()));
-  const [transcriptText, setTranscriptText] = useState(sampleTranscript);
+  const [transcriptText, setTranscriptText] = useState("");
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
-  const [selectedCode, setSelectedCode] = useState("FIX-KANAL-2K");
+  const [selectedCode, setSelectedCode] = useState("");
   const [approved, setApproved] = useState(false);
   const [response, setResponse] = useState<PipelineReviewResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -208,6 +213,8 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [editableNote, setEditableNote] = useState<ClinicalNote | null>(null);
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState("transcript");
+  const [sessionType, setSessionType] = useState<"clinical_note" | "perio">("clinical_note");
+  const [persistedPerioResult, setPersistedPerioResult] = useState<PerioSessionResult | null>(null);
 
   const utterances = useMemo(() => parseTranscript(transcriptText), [transcriptText]);
   const transcriptDiagnostics = useMemo(() => inspectTranscript(transcriptText), [transcriptText]);
@@ -219,6 +226,58 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   const noteSections = displayedNote ? noteSectionsFromBackend(displayedNote) : [];
   const needsRoleReview = Boolean(response?.role_review_required);
   const hasAnalysisDraft = Boolean(displayedNote) && (response?.next_action === "review_note_and_codes" || response?.role_review_required);
+
+  useEffect(() => {
+    let active = true;
+    fetch(`${API_BASE}/sessions/${sessionId}/review`, { headers: AUTH_HEADERS })
+      .then(async (reviewResponse) => {
+        if (reviewResponse.ok) {
+          return { snapshot: (await reviewResponse.json()) as SessionReviewSnapshot, metadata: null };
+        }
+        const metadataResponse = await fetch(`${API_BASE}/sessions/${sessionId}`, { headers: AUTH_HEADERS });
+        return {
+          snapshot: null,
+          metadata: metadataResponse.ok ? ((await metadataResponse.json()) as SessionMetadata) : null,
+        };
+      })
+      .then(({ snapshot, metadata }) => {
+        if (!active) return;
+        const nextSessionType = snapshot?.session_type ?? metadata?.session_type ?? "clinical_note";
+        setSessionType(nextSessionType);
+        if (!snapshot) return;
+
+        const snapshotUtterances = snapshot.transcript ?? [];
+        setTranscriptText(snapshotUtterances.map((item) => `${item.speaker_id}: ${item.text}`).join("\n"));
+        setPersistedPerioResult(snapshot.perio_result ?? null);
+
+        const clinicalReview = snapshot.clinical_review;
+        if (!clinicalReview) return;
+        setResponse(clinicalReview);
+        setEditableNote(clinicalReview.dentist_review?.note ?? null);
+        setExportPayload(clinicalReview.export_payload ?? null);
+        setApproved(clinicalReview.status === "approved" && Boolean(clinicalReview.export_payload));
+        if (clinicalReview.role_review) {
+          setSpeakers(
+            clinicalReview.role_review.speakers.map((speaker) => ({
+              id: speaker.speaker_id,
+              role: speaker.role,
+              status: speaker.status,
+              utterances: speaker.utterance_count,
+              sample: sampleForSpeaker(speaker.speaker_id, snapshotUtterances),
+              reason: speaker.reason ?? undefined,
+            })),
+          );
+        }
+        const firstCode = clinicalReview.dentist_review?.procedures[0]?.candidates[0]?.code;
+        if (firstCode) setSelectedCode(firstCode);
+      })
+      .catch((reason) => {
+        if (active) setError(errorMessage(reason));
+      });
+    return () => {
+      active = false;
+    };
+  }, [sessionId]);
 
   useEffect(() => {
     if (!hasAnalysisDraft || !displayedNote || approved) {
@@ -257,7 +316,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
             disabled={isLoading || !displayedNote}
           >
             {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
-            İncele ve Onayla
+            Onayla ve Kaydet
           </Button>
         </div>
       ),
@@ -410,7 +469,8 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
 
   const hasDentalChart = procedures.some((procedure) => procedure.procedure.tooth_number_fdi);
   const hasCodeSuggestions = procedures.some((procedure) => procedure.candidates.length);
-  const defaultTab = hasAnalysisDraft && displayedNote ? "note" : hasDentalChart ? "chart" : hasCodeSuggestions ? "codes" : "transcript";
+  const isPerioSession = sessionType === "perio";
+  const defaultTab = isPerioSession ? "perio" : hasAnalysisDraft && displayedNote ? "note" : hasDentalChart ? "chart" : hasCodeSuggestions ? "codes" : "transcript";
   useEffect(() => {
     setActiveWorkspaceTab(defaultTab);
   }, [defaultTab]);
@@ -446,6 +506,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
               {hasDentalChart ? <TabsTrigger value="chart">Diş Şeması</TabsTrigger> : null}
               {hasCodeSuggestions ? <TabsTrigger value="codes">Kod Önerileri</TabsTrigger> : null}
               {transcriptText.trim() ? <TabsTrigger value="transcript">Transkript</TabsTrigger> : null}
+              {isPerioSession ? <TabsTrigger value="perio">Perio</TabsTrigger> : null}
             </TabsList>
 
             <TabsContent value="note">
@@ -475,6 +536,16 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
                 <TranscriptTab transcriptText={transcriptText} onTranscriptChange={setTranscriptText} />
               </TabsContent>
             ) : null}
+            {isPerioSession ? (
+              <TabsContent value="perio">
+                <PerioChartPanel
+                  sessionId={sessionId}
+                  apiBase={API_BASE}
+                  authHeaders={AUTH_HEADERS}
+                  initialResult={persistedPerioResult}
+                />
+              </TabsContent>
+            ) : null}
           </Tabs>
 
             {error ? (
@@ -487,10 +558,25 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     );
   }
 
+  if (isPerioSession) {
+    return (
+      <main className="min-h-[calc(100vh-4rem)] bg-background p-4 md:p-6">
+        <div className="mx-auto max-w-7xl">
+          <PerioChartPanel
+            sessionId={sessionId}
+            apiBase={API_BASE}
+            authHeaders={AUTH_HEADERS}
+            initialResult={persistedPerioResult}
+          />
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="bg-background p-4 md:p-6">
       <div className="mx-auto max-w-5xl">
-        <Tabs defaultValue="transcript" className="gap-4">
+        <Tabs value={activeWorkspaceTab} onValueChange={setActiveWorkspaceTab} className="gap-4">
           <TabsList>
             <TabsTrigger value="transcript">Transkript</TabsTrigger>
           </TabsList>

@@ -23,6 +23,7 @@ from app.pipeline.types import (
     ToothSurface,
     ToothType,
     ToothPerioSummary,
+    PerioSite,
     Utterance,
     derive_fdi_classification,
 )
@@ -44,6 +45,67 @@ class ScriptedLLM(LLMProvider):
 
 
 class PipelineContractTests(unittest.TestCase):
+    def test_perio_site_mapping_preserves_mb_db_booleans_and_site_recession(self) -> None:
+        llm = ScriptedLLM(
+            [
+                {
+                    "tooth_segments": [
+                        {
+                            "tooth_number_fdi": 16,
+                            "source_quote": "16 bukkal dört dört üç, kanama var, plak var.",
+                            "is_uncertain": False,
+                            "sites": [
+                                {"site": "MB", "pocket_depth_mm": 4, "bleeding_on_probing": True, "plaque": True},
+                                {"site": "B", "pocket_depth_mm": 4, "bleeding_on_probing": True, "plaque": True},
+                                {"site": "DB", "pocket_depth_mm": 3, "bleeding_on_probing": True, "plaque": True},
+                            ],
+                        },
+                        {
+                            "tooth_number_fdi": 26,
+                            "source_quote": "26 bukkal üç üç dört, recession bir milimetre bukkalde.",
+                            "is_uncertain": False,
+                            "sites": [
+                                {"site": "MB", "pocket_depth_mm": 3},
+                                {
+                                    "site": "B",
+                                    "pocket_depth_mm": 3,
+                                    "gingival_margin_mm": 9,
+                                    "recession_mm": 1,
+                                },
+                                {"site": "DB", "pocket_depth_mm": 4},
+                            ],
+                        },
+                    ],
+                    "unassigned_segments": [],
+                    "uncertain_items": [],
+                }
+            ]
+        )
+
+        measurements, uncertain_items = stages.extract_perio_site_measurements(
+            "sentetik perio diktesi", llm
+        )
+        by_tooth_site = {
+            (item.tooth_number_fdi, item.site): item for item in measurements
+        }
+
+        self.assertEqual(by_tooth_site[(16, PerioSite.MB)].pocket_depth_mm, 4)
+        self.assertEqual(by_tooth_site[(16, PerioSite.B)].pocket_depth_mm, 4)
+        self.assertEqual(by_tooth_site[(16, PerioSite.DB)].pocket_depth_mm, 3)
+        for site in (PerioSite.MB, PerioSite.B, PerioSite.DB):
+            self.assertIs(by_tooth_site[(16, site)].bleeding_on_probing, True)
+            self.assertIs(by_tooth_site[(16, site)].plaque, True)
+
+        self.assertEqual(by_tooth_site[(26, PerioSite.MB)].pocket_depth_mm, 3)
+        self.assertEqual(by_tooth_site[(26, PerioSite.B)].pocket_depth_mm, 3)
+        self.assertEqual(by_tooth_site[(26, PerioSite.DB)].pocket_depth_mm, 4)
+        self.assertIsNone(by_tooth_site[(26, PerioSite.MB)].recession_mm)
+        self.assertEqual(by_tooth_site[(26, PerioSite.B)].recession_mm, 1)
+        self.assertEqual(by_tooth_site[(26, PerioSite.B)].gingival_margin_mm, -1)
+        self.assertEqual(by_tooth_site[(26, PerioSite.B)].attachment_level_mm, 4)
+        self.assertIsNone(by_tooth_site[(26, PerioSite.DB)].recession_mm)
+        self.assertEqual(uncertain_items, [])
+
     def test_perio_summary_invariant_clears_and_logs_ineligible_furcation(self) -> None:
         violating_summary = ToothPerioSummary.model_construct(
             tooth_number_fdi=11,

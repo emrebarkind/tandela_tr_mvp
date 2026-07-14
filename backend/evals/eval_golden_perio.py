@@ -14,12 +14,43 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from app.pipeline.types import PerioMeasurement, PerioSite
+from app.pipeline.stages import _derive_gingival_margin_mm
 from app.prompts.loader import load_system_prompt
 from app.providers.gemini_provider import GeminiLLMProvider, _strip_json_fences
 
 
 SINGLE_PROMPT = "perio_extraction.md"
 MULTI_PROMPT = "perio_multi_tooth_extraction.md"
+
+SINGLE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "measurements": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tooth_number_fdi": {"type": "integer"},
+                    "site": {"type": "string", "enum": ["MB", "B", "DB", "ML", "L", "DL"]},
+                    "pocket_depth_mm": {"type": ["integer", "null"]},
+                    "gingival_margin_mm": {"type": ["integer", "null"]},
+                    "bleeding_on_probing": {"type": ["boolean", "null"]},
+                    "plaque": {"type": ["boolean", "null"]},
+                    "recession_mm": {"type": ["integer", "null"]},
+                    "source_quote": {"type": "string"},
+                    "is_uncertain": {"type": "boolean"},
+                },
+                "required": [
+                    "tooth_number_fdi", "site", "pocket_depth_mm",
+                    "gingival_margin_mm", "bleeding_on_probing", "plaque",
+                    "recession_mm", "source_quote", "is_uncertain",
+                ],
+            },
+        },
+        "uncertain_items": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["measurements", "uncertain_items"],
+}
 
 MULTI_RESPONSE_SCHEMA = {
     "type": "object",
@@ -81,7 +112,9 @@ class PerioEvalGeminiProvider(GeminiLLMProvider):
     """Real Gemini provider with enough output budget for multi-tooth JSON."""
 
     def complete(self, system_prompt: str, user_input: str) -> str:
-        response_schema = MULTI_RESPONSE_SCHEMA if "tooth_segments" in system_prompt else None
+        response_schema = (
+            MULTI_RESPONSE_SCHEMA if "tooth_segments" in system_prompt else SINGLE_RESPONSE_SCHEMA
+        )
         config = types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=0.0,
@@ -165,6 +198,12 @@ SCENARIOS = (
         "prompt_file": MULTI_PROMPT,
         "input_label": "Multi-tooth dentist periodontal dictation",
     },
+    {
+        "name": "Perio I",
+        "dictation": "26 bukkal altı yedi altı, recession iki milimetre bukkalde.",
+        "prompt_file": MULTI_PROMPT,
+        "input_label": "Multi-tooth dentist periodontal dictation",
+    },
 )
 
 
@@ -181,15 +220,19 @@ def _normalize_multi_result(raw_data: dict) -> PerioExtractionResult:
         assert len(values_by_site) == len(segment.sites), "duplicate perio site in segment"
         for site in PerioSite:
             values = values_by_site.get(site)
+            recession_mm = values.recession_mm if values else None
             measurements.append(
                 PerioMeasurement(
                     tooth_number_fdi=segment.tooth_number_fdi,
                     site=site,
                     pocket_depth_mm=values.pocket_depth_mm if values else None,
-                    gingival_margin_mm=values.gingival_margin_mm if values else None,
+                    gingival_margin_mm=_derive_gingival_margin_mm(
+                        values.gingival_margin_mm if values else None,
+                        recession_mm,
+                    ),
                     bleeding_on_probing=values.bleeding_on_probing if values else None,
                     plaque=values.plaque if values else None,
-                    recession_mm=values.recession_mm if values else None,
+                    recession_mm=recession_mm,
                     source_quote=segment.source_quote,
                     is_uncertain=segment.is_uncertain or bool(values and values.is_uncertain),
                 )
@@ -307,12 +350,31 @@ def _assert_e(result: PerioExtractionResult, raw_data: dict) -> None:
     _assert_forbidden_raw_fields(raw_data)
 
 
+def _assert_i(result: PerioExtractionResult, raw_data: dict) -> None:
+    assert len(result.measurements) == 6
+    assert result.unassigned_segments == []
+    assert result.uncertain_items == []
+    by_site = _measurements_for_tooth(result, 26)
+    for site, depth in zip((PerioSite.MB, PerioSite.B, PerioSite.DB), (6, 7, 6)):
+        assert by_site[site].pocket_depth_mm == depth
+    assert by_site[PerioSite.B].recession_mm == 2
+    assert by_site[PerioSite.B].gingival_margin_mm == -2
+    assert by_site[PerioSite.B].attachment_level_mm == 9
+    for site in (PerioSite.MB, PerioSite.DB):
+        assert by_site[site].recession_mm is None
+        assert by_site[site].gingival_margin_mm is None
+        assert by_site[site].attachment_level_mm is None
+    assert all(item.source_quote == SCENARIOS[5]["dictation"] for item in by_site.values())
+    _assert_forbidden_raw_fields(raw_data)
+
+
 ASSERTIONS = {
     "Perio A": _assert_a,
     "Perio B": _assert_b,
     "Perio C": _assert_c,
     "Perio D": _assert_d,
     "Perio E": _assert_e,
+    "Perio I": _assert_i,
 }
 
 

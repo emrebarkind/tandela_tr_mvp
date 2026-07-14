@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { Activity, FileText } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { fetchPatientSessions, type PatientSessions } from "@/lib/patients-api";
@@ -41,7 +42,7 @@ export default function PatientDetailPage({ params }: { params: { id: string } }
               <CardTitle className="mt-1 text-2xl">{patient ? displayPatient(patient) : "Yükleniyor"}</CardTitle>
               <p className="mt-2 text-sm text-muted-foreground">Dosya no: {patient?.external_id ?? "Yok"}</p>
             </div>
-            <Link className="inline-flex h-9 items-center rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground" href="/session/new">
+            <Link className="inline-flex h-9 items-center rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground" href={`/session/new?patient_id=${encodeURIComponent(params.id)}`}>
               Bu hastayla yeni görüşme
             </Link>
           </CardHeader>
@@ -63,7 +64,10 @@ export default function PatientDetailPage({ params }: { params: { id: string } }
               >
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <p className="font-semibold">{formatDate(session.started_at)}</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-semibold">{formatDate(session.started_at)}</p>
+                      <SessionTypeBadge sessionType={session.session_type} />
+                    </div>
                     <ProcedureSummary procedures={session.procedures} />
                   </div>
                   <StatusBadge status={session.status} />
@@ -74,6 +78,23 @@ export default function PatientDetailPage({ params }: { params: { id: string } }
         </Card>
       </div>
     </main>
+  );
+}
+
+function SessionTypeBadge({ sessionType }: { sessionType: "clinical_note" | "perio" }) {
+  if (sessionType === "perio") {
+    return (
+      <Badge variant="secondary" className="gap-1.5 rounded-lg border border-border">
+        <Activity className="size-3.5" aria-hidden="true" />
+        Perio
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="gap-1.5 rounded-lg border-primary/30 bg-primary/10 text-primary">
+      <FileText className="size-3.5" aria-hidden="true" />
+      Klinik Not
+    </Badge>
   );
 }
 

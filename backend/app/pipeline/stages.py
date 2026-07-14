@@ -1301,21 +1301,33 @@ def extract_perio_site_measurements(
 
         for site in PerioSite:
             values = values_by_site.get(site, {})
+            recession_mm = values.get("recession_mm")
             measurements.append(
                 PerioMeasurement(
                     tooth_number_fdi=tooth_number,
                     site=site,
                     pocket_depth_mm=values.get("pocket_depth_mm"),
-                    gingival_margin_mm=values.get("gingival_margin_mm"),
+                    gingival_margin_mm=_derive_gingival_margin_mm(
+                        values.get("gingival_margin_mm"), recession_mm
+                    ),
                     bleeding_on_probing=values.get("bleeding_on_probing"),
                     plaque=values.get("plaque"),
-                    recession_mm=values.get("recession_mm"),
+                    recession_mm=recession_mm,
                     source_quote=source_quote,
                     is_uncertain=segment_uncertain or values.get("is_uncertain", False),
                 )
             )
 
     return measurements, uncertain_items
+
+
+def _derive_gingival_margin_mm(
+    gingival_margin_mm: Optional[int], recession_mm: Optional[int]
+) -> Optional[int]:
+    """Normalize recession to the signed CEJ-relative gingival margin."""
+    if recession_mm is not None:
+        return -recession_mm
+    return gingival_margin_mm
 
 
 def _append_dental_chart_uncertainty(

@@ -90,6 +90,8 @@ class SessionRepository:
         self.ensure_clinic(clinic_id)
         if dentist_id is not None:
             self.ensure_user(dentist_id, clinic_id=clinic_id)
+        if patient_id is not None:
+            self._require_patient_in_clinic(patient_id, clinic_id)
         record = self.db.get(Session, session_id)
         mapped_status = _session_status(status)
         if record is None:
@@ -124,6 +126,7 @@ class SessionRepository:
         clinic_id: str,
         actor_user_id: Optional[str],
         transcript_source: str,
+        patient_id: Optional[str] = None,
     ) -> Session:
         self.upsert_session(
             result.session_id,
@@ -131,6 +134,7 @@ class SessionRepository:
             current_stage=result.stopped_at_stage,
             clinic_id=clinic_id,
             dentist_id=actor_user_id,
+            patient_id=patient_id,
         )
         if result.speaker_labelled_transcript is not None:
             self.save_transcript(
@@ -374,6 +378,17 @@ class SessionRepository:
             stmt = stmt.where(Session.clinic_id == clinic_id)
         return self.db.scalar(stmt)
 
+    def save_review_snapshot(self, session_id: str, snapshot: dict, *, clinic_id: str) -> None:
+        record = self._require_session_in_clinic(session_id, clinic_id)
+        record.review_snapshot_json = snapshot
+        self.db.flush()
+
+    def get_review_snapshot(self, session_id: str, *, clinic_id: str) -> Optional[dict]:
+        record = self.latest_session(session_id, clinic_id=clinic_id)
+        if record is None or record.review_snapshot_json is None:
+            return None
+        return record.review_snapshot_json
+
     def get_session(self, session_id: str, *, clinic_id: str) -> Optional[dict]:
         record = self.latest_session(session_id, clinic_id=clinic_id)
         if record is None:
@@ -477,10 +492,19 @@ class SessionRepository:
         return {
             "id": session.id,
             "status": session.status,
+            "session_type": session.session_type,
             "started_at": session.started_at.isoformat() if session.started_at else None,
             "completed_at": session.completed_at.isoformat() if session.completed_at else None,
             "procedures": self._procedure_labels(session),
         }
+
+    def _require_patient_in_clinic(self, patient_id: str, clinic_id: str) -> Patient:
+        patient = self.db.scalar(
+            select(Patient).where(Patient.id == patient_id, Patient.clinic_id == clinic_id)
+        )
+        if patient is None:
+            raise PermissionError("Hasta bulunamadı veya farklı kliniğe ait.")
+        return patient
 
     def _procedure_labels(self, session: Session) -> list[str]:
         labels: list[str] = []

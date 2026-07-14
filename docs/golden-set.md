@@ -521,3 +521,23 @@ istenmez; backend tarafından deterministik hesaplanır.
 - Kayıt `is_uncertain=true` olur; `uncertain_items` içinde
   `furkasyon bu diş tipinde geçerli değil` anlamında bir not bulunur.
 - Model açıkça söylenen dereceyi dahi kaydetmez; `source_quote` birebir korunur.
+
+## Perio Senaryo I — Resesyondan gingival margin ve attachment level
+
+### Transkript
+
+```
+26 bukkal altı yedi altı, recession iki milimetre bukkalde.
+```
+
+### Beklenen
+
+- Standart bukkal üçlü sıra `MB → B → DB` olarak uygulanır:
+  `MB=6`, `B=7`, `DB=6`.
+- Yalnız B sitesinde `recession_mm=2` bulunur.
+- LLM yalnız açık resesyon değerini çıkarır; backend B sitesi için
+  `gingival_margin_mm=-2` değerini deterministik olarak türetir.
+- B sitesi `attachment_level_mm=9` verir: `7 - (-2) = 9`.
+- MB ve DB sitelerinde resesyon ve gingival margin `null` kalır; değer başka
+  siteye sızmaz.
+- `source_quote` transkriptle birebir aynıdır ve `uncertain_items` boş kalır.

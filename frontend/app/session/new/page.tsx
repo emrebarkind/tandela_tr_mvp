@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { CheckCircle2, ClipboardCheck, FileText, Loader2, Mic, PencilLine, Save, ShieldCheck, Timer, X } from "lucide-react";
 import { useHeader } from "@/components/app/HeaderContext";
@@ -15,6 +16,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { fetchPatients, type PatientSummary } from "@/lib/patients-api";
+import type { PerioSessionResult } from "@/components/review/PerioChartPanel";
 
 type Role = "dentist" | "patient" | "assistant_or_other" | "unknown";
 type SpeakerStatus = "clear" | "review_needed" | "unresolved";
@@ -234,6 +237,16 @@ type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
 type RecorderState = "idle" | "connecting" | "recording" | "paused" | "stopping";
 
 export default function ReviewPage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Görüşme ekranı hazırlanıyor...</div>}>
+      <ReviewPageContent />
+    </Suspense>
+  );
+}
+
+function ReviewPageContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { clearHeader, setHeader } = useHeader();
   const [sessionId] = useState(() => createSessionId());
   const [patientName] = useState("Demo Danışan");
@@ -258,6 +271,10 @@ export default function ReviewPage() {
   const [recorderState, setRecorderState] = useState<RecorderState>("idle");
   const [recordingElapsedSec, setRecordingElapsedSec] = useState(0);
   const transcriptTextRef = useRef("");
+  const [sessionMode, setSessionMode] = useState<"clinical_note" | "perio">("clinical_note");
+  const [patients, setPatients] = useState<PatientSummary[]>([]);
+  const [patientId, setPatientId] = useState(() => searchParams.get("patient_id") ?? "");
+  const [perioDictation, setPerioDictation] = useState("");
 
   const utterances = useMemo(() => parseTranscript(transcriptText), [transcriptText]);
   const transcriptDiagnostics = useMemo(() => inspectTranscript(transcriptText), [transcriptText]);
@@ -290,6 +307,20 @@ export default function ReviewPage() {
           : transcriptText.trim()
             ? "Analize hazır"
             : "Kayıt bekleniyor";
+
+  useEffect(() => {
+    let active = true;
+    void fetchPatients("")
+      .then((items) => {
+        if (active) setPatients(items);
+      })
+      .catch(() => {
+        if (active) setPatients([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!hasAnalysisDraft || !displayedNote || approved) {
@@ -329,7 +360,7 @@ export default function ReviewPage() {
             disabled={isLoading || !displayedNote}
           >
             {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
-            İncele ve Onayla
+            Onayla ve Kaydet
           </Button>
         </div>
       ),
@@ -367,6 +398,7 @@ export default function ReviewPage() {
     try {
       const form = new FormData();
       form.append("audio", audioBlob, `${sessionId}.webm`);
+      if (patientId) form.append("patient_id", patientId);
       const result = await postMultipartReviewResponse(`/sessions/${encodeURIComponent(sessionId)}/audio`, form);
       const audioTranscript = result.audio_processing?.transcript?.utterances ?? [];
       if (audioTranscript.length) {
@@ -385,8 +417,29 @@ export default function ReviewPage() {
   async function runTranscriptAnalysis(sourceUtterances: TranscriptUtterance[]) {
     return postReviewResponse("/sessions", {
       session_id: sessionId,
+      patient_id: patientId || null,
       utterances: sourceUtterances,
     });
+  }
+
+  async function analyzePerioDictation() {
+    if (!patientId || !perioDictation.trim()) {
+      setError("Perio diktesi için hasta ve dikte metni gereklidir.");
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      await postPerioResponse(`/sessions/${encodeURIComponent(sessionId)}/perio`, {
+        patient_id: patientId,
+        dictation: perioDictation.trim(),
+      });
+      router.push(`/session/${encodeURIComponent(sessionId)}`);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   async function analyzeTranscript() {
@@ -646,8 +699,59 @@ export default function ReviewPage() {
     );
   }
 
+  if (sessionMode === "perio") {
+    return (
+      <main className="min-h-[calc(100vh-4rem)] bg-background p-4 md:p-6">
+        <div className="mx-auto max-w-3xl space-y-5">
+          <SessionModeSelector mode={sessionMode} onChange={setSessionMode} />
+          <Card className="border-border bg-card shadow-panel">
+            <CardHeader>
+              <p className="text-xs font-semibold uppercase text-muted-foreground">Yeni Perio Seansı</p>
+              <CardTitle className="font-heading text-2xl">Periodontal Dikte</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div>
+                <label className="mb-2 block text-sm font-semibold">Hasta</label>
+                <Select value={patientId} onValueChange={(value) => setPatientId(value ?? "")}>
+                  <SelectTrigger className="h-11 w-full border-border bg-background">
+                    <SelectValue>{patientId ? patientLabel(patients.find((patient) => patient.id === patientId)) : "Hasta seçin"}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {patients.map((patient) => (
+                      <SelectItem key={patient.id} value={patient.id}>{patientLabel(patient)}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-semibold" htmlFor="perio-dictation">Dikte</label>
+                <Textarea
+                  id="perio-dictation"
+                  value={perioDictation}
+                  onChange={(event) => setPerioDictation(event.target.value)}
+                  placeholder="Örn. 16 bukkal üç dört dört, mobilite bir, furkasyon iki bukkal."
+                  className="min-h-44 border-border bg-background"
+                />
+              </div>
+              {error ? <p className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+              <div className="flex justify-end">
+                <Button onClick={() => void analyzePerioDictation()} disabled={isLoading || !patientId || !perioDictation.trim()}>
+                  {isLoading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <ClipboardCheck className="mr-2 size-4" />}
+                  Analiz Et
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="relative min-h-[calc(100vh-4rem)] overflow-hidden bg-background pb-24 text-foreground">
+      <div className="mx-auto w-full max-w-[1680px] px-4 pt-4 md:px-6">
+        <SessionModeSelector mode={sessionMode} onChange={setSessionMode} />
+      </div>
       <div className="mx-auto grid min-h-[calc(100vh-10rem)] w-full max-w-[1680px] gap-5 px-4 py-4 md:px-6 min-[760px]:grid-cols-[minmax(300px,0.44fr)_minmax(320px,0.56fr)]">
         <section className="flex min-h-[720px] flex-col overflow-hidden rounded-[32px] border border-border bg-card shadow-panel">
           <div className="border-b border-border p-6">
@@ -834,6 +938,46 @@ async function postReviewResponse(path: string, body: unknown): Promise<Pipeline
     throw new Error(text || `HTTP ${response.status}`);
   }
   return response.json() as Promise<PipelineReviewResponse>;
+}
+
+async function postPerioResponse(path: string, body: unknown): Promise<PerioSessionResult> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
+  return response.json() as Promise<PerioSessionResult>;
+}
+
+function SessionModeSelector({ mode, onChange }: {
+  mode: "clinical_note" | "perio";
+  onChange: (mode: "clinical_note" | "perio") => void;
+}) {
+  return (
+    <div className="flex w-full flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-2 shadow-card" aria-label="Görüşme türü">
+      <div className="min-w-44 px-2 py-1">
+        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Görüşme türü</p>
+        <p className="mt-0.5 text-sm text-foreground">Başlatacağınız klinik akışı seçin.</p>
+      </div>
+      <div className="inline-flex rounded-lg bg-muted p-1" role="group" aria-label="Görüşme türü seçenekleri">
+        <Button type="button" className="h-10 gap-2 px-4" variant={mode === "clinical_note" ? "default" : "ghost"} onClick={() => onChange("clinical_note")}>
+          <FileText className="size-4" aria-hidden="true" />
+          Hasta Görüşmesi
+        </Button>
+        <Button type="button" className="h-10 gap-2 px-4" variant={mode === "perio" ? "default" : "ghost"} onClick={() => onChange("perio")}>
+          <ClipboardCheck className="size-4" aria-hidden="true" />
+          Perio Dikte
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function patientLabel(patient: PatientSummary | undefined) {
+  if (!patient) return "Hasta seçin";
+  const name = patient.initials?.trim() || "İsimsiz hasta";
+  return patient.external_id ? `${name} · ${patient.external_id}` : name;
 }
 
 async function patchReviewResponse(path: string, body: unknown): Promise<PipelineReviewResponse> {

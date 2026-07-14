@@ -81,9 +81,11 @@ MEASUREMENTS:
   record is uncertain, and `uncertain_items` explains the rejected value.
 - `gingival_margin_mm`: extract only when explicitly dictated as gingival
   margin. Preserve an explicitly spoken negative sign. Do not derive it from
-  recession.
+  recession in the model output.
 - `recession_mm`: extract only when explicitly dictated as recession. Do not
-  derive it from gingival margin.
+  derive it from gingival margin. After parsing, the backend deterministically
+  sets `gingival_margin_mm = -recession_mm`; when both fields are present, the
+  recession-derived value is authoritative.
 - `bleeding_on_probing`: `kanama var`, `BOP pozitif` -> `true`;
   `kanama yok`, `BOP negatif` -> `false`; otherwise `null`.
 - `plaque`: `plak var`, `plak pozitif` -> `true`; `plak yok`,
