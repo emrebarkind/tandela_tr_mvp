@@ -49,6 +49,7 @@ class Patient(Base):
     clinic_id: Mapped[str] = mapped_column(ForeignKey("clinics.id"), nullable=False, index=True)
     external_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     initials: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     clinic: Mapped[Clinic] = relationship(back_populates="patients")

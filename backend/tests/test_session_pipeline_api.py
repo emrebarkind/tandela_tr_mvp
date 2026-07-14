@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -208,6 +209,56 @@ class SessionPipelineApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), snapshot)
+
+    def test_patient_creation_and_manual_session_attachment(self) -> None:
+        calls: list[tuple[str, dict]] = []
+        patient = SimpleNamespace(
+            id="patient-created",
+            initials=None,
+            display_name="Ayşe Yılmaz",
+            external_id="DOSYA-42",
+            created_at=datetime.now(timezone.utc),
+        )
+
+        class StubRepository:
+            def create_patient(self, patient_id: str, **kwargs):
+                calls.append(("create_patient", {"patient_id": patient_id, **kwargs}))
+                return patient
+
+            def attach_patient_to_session(self, session_id: str, patient_id: str, **kwargs):
+                calls.append(("attach_patient", {"session_id": session_id, "patient_id": patient_id, **kwargs}))
+
+            def add_audit_log(self, **kwargs):
+                calls.append(("add_audit_log", kwargs))
+
+        app.dependency_overrides[get_session_repository] = lambda: StubRepository()
+        client = TestClient(app)
+
+        empty = client.post("/patients", headers=AUTH_HEADERS, json={})
+        self.assertEqual(empty.status_code, 400)
+
+        created = client.post(
+            "/patients",
+            headers=AUTH_HEADERS,
+            json={"display_name": " Ayşe Yılmaz ", "external_id": " DOSYA-42 "},
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json()["display_name"], "Ayşe Yılmaz")
+        create_call = next(data for name, data in calls if name == "create_patient")
+        self.assertEqual(create_call["clinic_id"], "clinic-test")
+        self.assertEqual(create_call["display_name"], "Ayşe Yılmaz")
+        self.assertEqual(create_call["external_id"], "DOSYA-42")
+
+        attached = client.patch(
+            "/sessions/session-patient-link/patient",
+            headers=AUTH_HEADERS,
+            json={"patient_id": "patient-created"},
+        )
+        self.assertEqual(attached.status_code, 200)
+        self.assertEqual(attached.json()["patient_id"], "patient-created")
+        audit = next(data for name, data in calls if name == "add_audit_log")
+        self.assertEqual(audit["action"], "patient_attached")
+        self.assertEqual(audit["source"], "manual")
 
     def test_perio_approve_persists_audit_and_guards_export_until_approved(self) -> None:
         snapshot = {

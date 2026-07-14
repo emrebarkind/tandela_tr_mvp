@@ -108,6 +108,36 @@ class SessionRepositoryTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_optional_patient_name_can_be_created_and_attached_to_multiple_sessions(self) -> None:
+        db = self.session_factory()
+        try:
+            repo = SessionRepository(db)
+            patient = repo.create_patient(
+                "patient-ayse",
+                clinic_id="clinic-1",
+                display_name="Ayşe Yılmaz",
+                external_id="DOSYA-42",
+            )
+            repo.upsert_session("visit-1", status="draft", clinic_id="clinic-1")
+            repo.upsert_session("visit-2", status="draft", clinic_id="clinic-1")
+            repo.attach_patient_to_session("visit-1", patient.id, clinic_id="clinic-1")
+            repo.attach_patient_to_session("visit-2", patient.id, clinic_id="clinic-1")
+            db.commit()
+
+            history = repo.get_patient_sessions(patient.id, clinic_id="clinic-1")
+            self.assertEqual(history["display_name"], "Ayşe Yılmaz")
+            self.assertEqual(len(history["sessions"]), 2)
+            self.assertTrue(all(item["started_at"] for item in history["sessions"]))
+            with self.assertRaises(ValueError):
+                repo.create_patient(
+                    "patient-duplicate",
+                    clinic_id="clinic-1",
+                    display_name="Başka Hasta",
+                    external_id="DOSYA-42",
+                )
+        finally:
+            db.close()
+
     def test_reanalysis_replaces_active_note_and_code_suggestions_but_keeps_transcripts(self) -> None:
         db = self.session_factory()
         try:

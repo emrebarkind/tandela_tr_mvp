@@ -13,11 +13,12 @@ import { Badge } from "@/components/ui/badge";
 import { DraftBadge } from "@/components/ui/draft-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { fetchPatients, type PatientSummary } from "@/lib/patients-api";
+import { attachPatientToSession, createPatient, fetchPatients, type PatientSummary } from "@/lib/patients-api";
 import type { PerioSessionResult } from "@/components/review/PerioChartPanel";
 
 type Role = "dentist" | "patient" | "assistant_or_other" | "unknown";
@@ -290,6 +291,11 @@ function ReviewPageContent() {
   const [sessionMode, setSessionMode] = useState<"clinical_note" | "perio">("clinical_note");
   const [patients, setPatients] = useState<PatientSummary[]>([]);
   const [patientId, setPatientId] = useState(() => searchParams.get("patient_id") ?? "");
+  const [patientNameDraft, setPatientNameDraft] = useState("");
+  const [patientFileDraft, setPatientFileDraft] = useState("");
+  const [patientNameSuggestion, setPatientNameSuggestion] = useState<string | null>(null);
+  const [patientMessage, setPatientMessage] = useState<string | null>(null);
+  const [isSavingPatient, setIsSavingPatient] = useState(false);
   const [perioDictation, setPerioDictation] = useState("");
   const patientName = patientId ? patientLabel(patients.find((patient) => patient.id === patientId)) : "Yeni Görüşme";
 
@@ -459,6 +465,48 @@ function ReviewPageContent() {
     }
   }
 
+  async function saveAndAttachPatient() {
+    const displayName = patientNameDraft.trim();
+    const externalId = patientFileDraft.trim();
+    if (!displayName && !externalId) {
+      setPatientMessage("İsim/baş harf veya dosya numarasından en az birini yazın.");
+      return;
+    }
+    setIsSavingPatient(true);
+    setPatientMessage(null);
+    try {
+      const patient = await createPatient({
+        display_name: displayName || null,
+        external_id: externalId || null,
+      });
+      setPatients((current) => [...current.filter((item) => item.id !== patient.id), patient]);
+      setPatientId(patient.id);
+      setPatientNameSuggestion(null);
+      if (response?.session_id) {
+        await attachPatientToSession(response.session_id, patient.id);
+      }
+      setPatientMessage(
+        response?.session_id
+          ? "Hasta oluşturuldu ve bu görüşmeye bağlandı."
+          : "Hasta oluşturuldu; görüşme analiz edildiğinde bu hastaya bağlanacak.",
+      );
+    } catch (caught) {
+      setPatientMessage(errorMessage(caught));
+    } finally {
+      setIsSavingPatient(false);
+    }
+  }
+
+  function selectExistingPatient(value: string) {
+    setPatientId(value);
+    setPatientMessage(null);
+    if (value && response?.session_id) {
+      void attachPatientToSession(response.session_id, value)
+        .then(() => setPatientMessage("Mevcut hasta bu görüşmeye bağlandı."))
+        .catch((caught) => setPatientMessage(errorMessage(caught)));
+    }
+  }
+
   async function analyzeTranscript() {
     if (!canAnalyzeTranscript) {
       setError("Transkriptte analiz edilemeyen satır var. Her satır A: metin formatında olmalı.");
@@ -615,6 +663,11 @@ function ReviewPageContent() {
             .map((speaker) => [speaker.speaker_id, speaker.role]),
         ),
       );
+      if (!patientId) {
+        setPatientNameSuggestion(
+          extractExplicitPatientNameSuggestion(sourceUtterances, result.role_review.speakers),
+        );
+      }
     }
     const firstCode = result.dentist_review?.procedures[0]?.candidates[0]?.code;
     if (firstCode) setSelectedCode(firstCode);
@@ -641,6 +694,11 @@ function ReviewPageContent() {
           reason: assignment.reason ?? undefined,
         })),
       );
+      if (!patientId) {
+        setPatientNameSuggestion(
+          extractExplicitPatientNameSuggestion(sourceUtterances, assignments),
+        );
+      }
     } catch {
       // Var olan role_review etiketlerini koru; başarısız hydrate için rol uydurma.
     }
@@ -747,6 +805,24 @@ function ReviewPageContent() {
       <main className="min-h-[calc(100vh-4rem)] bg-background p-4 md:p-6">
         <div className="mx-auto w-full max-w-[1680px] space-y-5">
           <SessionModeSelector mode={sessionMode} onChange={setSessionMode} />
+          <PatientIdentityPanel
+            patients={patients}
+            patientId={patientId}
+            nameDraft={patientNameDraft}
+            fileDraft={patientFileDraft}
+            suggestion={patientNameSuggestion}
+            message={patientMessage}
+            isSaving={isSavingPatient}
+            onPatientChange={selectExistingPatient}
+            onNameChange={setPatientNameDraft}
+            onFileChange={setPatientFileDraft}
+            onUseSuggestion={(value) => {
+              setPatientNameDraft(value);
+              setPatientNameSuggestion(null);
+            }}
+            onDismissSuggestion={() => setPatientNameSuggestion(null)}
+            onSave={() => void saveAndAttachPatient()}
+          />
           <section className="grid min-h-[720px] overflow-hidden rounded-[32px] border border-border bg-card shadow-panel lg:grid-cols-[minmax(320px,0.44fr)_minmax(420px,0.56fr)]">
             <div className="border-b border-border p-6 lg:border-b-0 lg:border-r">
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Yeni Perio Seansı</p>
@@ -754,19 +830,9 @@ function ReviewPageContent() {
               <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
                 Altı nokta ölçümlerini dikte edin; analiz kayıt tamamlandıktan sonra batch çalışır.
               </p>
-              <div className="mt-8">
-                <label className="mb-2 block text-sm font-semibold">Hasta</label>
-                <Select value={patientId} onValueChange={(value) => setPatientId(value ?? "")}>
-                  <SelectTrigger className="h-11 w-full border-border bg-background">
-                    <SelectValue>{patientId ? patientLabel(patients.find((patient) => patient.id === patientId)) : "Hasta seçin"}</SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {patients.map((patient) => (
-                      <SelectItem key={patient.id} value={patient.id}>{patientLabel(patient)}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              <p className="mt-8 text-sm text-muted-foreground">
+                Seçili hasta: <span className="font-semibold text-foreground">{patientName}</span>
+              </p>
             </div>
             <div className="flex min-h-0 flex-col bg-background/60 p-6">
               <div className="flex items-start justify-between gap-4">
@@ -800,6 +866,26 @@ function ReviewPageContent() {
     <main className="relative min-h-[calc(100vh-4rem)] overflow-hidden bg-background pb-24 text-foreground">
       <div className="mx-auto w-full max-w-[1680px] px-4 pt-4 md:px-6">
         <SessionModeSelector mode={sessionMode} onChange={setSessionMode} />
+        <div className="mt-4">
+          <PatientIdentityPanel
+            patients={patients}
+            patientId={patientId}
+            nameDraft={patientNameDraft}
+            fileDraft={patientFileDraft}
+            suggestion={patientNameSuggestion}
+            message={patientMessage}
+            isSaving={isSavingPatient}
+            onPatientChange={selectExistingPatient}
+            onNameChange={setPatientNameDraft}
+            onFileChange={setPatientFileDraft}
+            onUseSuggestion={(value) => {
+              setPatientNameDraft(value);
+              setPatientNameSuggestion(null);
+            }}
+            onDismissSuggestion={() => setPatientNameSuggestion(null)}
+            onSave={() => void saveAndAttachPatient()}
+          />
+        </div>
       </div>
       <div className="mx-auto grid min-h-[calc(100vh-10rem)] w-full max-w-[1680px] gap-5 px-4 py-4 md:px-6 min-[760px]:grid-cols-[minmax(300px,0.44fr)_minmax(320px,0.56fr)]">
         <section className="flex min-h-[720px] flex-col overflow-hidden rounded-[32px] border border-border bg-card shadow-panel">
@@ -1025,10 +1111,132 @@ function SessionModeSelector({ mode, onChange }: {
   );
 }
 
+function PatientIdentityPanel({
+  patients,
+  patientId,
+  nameDraft,
+  fileDraft,
+  suggestion,
+  message,
+  isSaving,
+  onPatientChange,
+  onNameChange,
+  onFileChange,
+  onUseSuggestion,
+  onDismissSuggestion,
+  onSave,
+}: {
+  patients: PatientSummary[];
+  patientId: string;
+  nameDraft: string;
+  fileDraft: string;
+  suggestion: string | null;
+  message: string | null;
+  isSaving: boolean;
+  onPatientChange: (value: string) => void;
+  onNameChange: (value: string) => void;
+  onFileChange: (value: string) => void;
+  onUseSuggestion: (value: string) => void;
+  onDismissSuggestion: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <Card className="border-border bg-card/80 shadow-card">
+      <CardContent className="p-4 md:p-5">
+        <div className="grid gap-4 lg:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_minmax(180px,0.8fr)_auto] lg:items-end">
+          <div>
+            <label className="mb-2 block text-sm font-semibold" htmlFor="patient-selection">Mevcut hasta</label>
+            <Select value={patientId} onValueChange={(value) => onPatientChange(value ?? "")}>
+              <SelectTrigger id="patient-selection" className="h-11 w-full border-border bg-background">
+                <SelectValue>{patientId ? patientLabel(patients.find((patient) => patient.id === patientId)) : "Hasta seçin (opsiyonel)"}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {patients.map((patient) => (
+                  <SelectItem key={patient.id} value={patient.id}>{patientLabel(patient)}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="mb-2 block text-sm font-semibold" htmlFor="patient-name">Baş Harfler / İsim <span className="font-normal text-muted-foreground">(opsiyonel)</span></label>
+            <Input
+              id="patient-name"
+              value={nameDraft}
+              onChange={(event) => onNameChange(event.target.value)}
+              placeholder="Örn. AY veya Ayşe Yılmaz"
+              maxLength={255}
+            />
+          </div>
+          <div>
+            <label className="mb-2 block text-sm font-semibold" htmlFor="patient-file-number">Dosya No <span className="font-normal text-muted-foreground">(opsiyonel)</span></label>
+            <Input
+              id="patient-file-number"
+              value={fileDraft}
+              onChange={(event) => onFileChange(event.target.value)}
+              placeholder="Örn. DEMO-003"
+              maxLength={128}
+            />
+          </div>
+          <div className="flex gap-2">
+            {patientId ? (
+              <Button type="button" variant="ghost" className="h-11" onClick={() => onPatientChange("")}>Seçimi kaldır</Button>
+            ) : null}
+            <Button type="button" className="h-11" onClick={onSave} disabled={isSaving || (!nameDraft.trim() && !fileDraft.trim())}>
+              {isSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+              Hastayı Kaydet
+            </Button>
+          </div>
+        </div>
+        {suggestion ? (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-secondary bg-secondary/60 px-4 py-3">
+            <p className="text-sm text-foreground">
+              Transkriptte hasta adı olarak <span className="font-semibold">“{suggestion}”</span> geçti. Yalnızca öneridir; siz onaylamadan kaydedilmez.
+            </p>
+            <div className="flex gap-2">
+              <Button type="button" size="sm" onClick={() => onUseSuggestion(suggestion)}>Öneriyi kullan</Button>
+              <Button type="button" size="sm" variant="ghost" onClick={onDismissSuggestion}>Yoksay</Button>
+            </div>
+          </div>
+        ) : null}
+        {message ? <p className="mt-3 text-sm text-muted-foreground">{message}</p> : null}
+        <p className="mt-3 text-xs text-muted-foreground">Hasta bilgisi zorunlu değildir. Aynı hastayı seçerek yeni tarihli görüşmeler oluşturabilirsiniz.</p>
+      </CardContent>
+    </Card>
+  );
+}
+
 function patientLabel(patient: PatientSummary | undefined) {
   if (!patient) return "Hasta seçin";
-  const name = patient.initials?.trim() || "İsimsiz hasta";
+  const name = patient.display_name?.trim() || patient.initials?.trim() || "İsimsiz hasta";
   return patient.external_id ? `${name} · ${patient.external_id}` : name;
+}
+
+function extractExplicitPatientNameSuggestion(
+  utterances: TranscriptUtterance[],
+  assignments: { speaker_id: string; role: Role }[],
+) {
+  const patientSpeakers = new Set(
+    assignments.filter((assignment) => assignment.role === "patient").map((assignment) => assignment.speaker_id),
+  );
+  for (let index = 0; index < utterances.length; index += 1) {
+    const utterance = utterances[index];
+    const previous = index > 0 ? utterances[index - 1] : null;
+    const followsExplicitNameQuestion = Boolean(
+      previous
+      && previous.speaker_id !== utterance.speaker_id
+      && /\b(?:adınız|isminiz)\s+nedir\b/i.test(previous.text),
+    );
+    if (!patientSpeakers.has(utterance.speaker_id) && !followsExplicitNameQuestion) continue;
+    const match = utterance.text.match(/\b(?:benim\s+adım|adım|ismim)\s+([^,.!?;:]+)/i);
+    if (!match) continue;
+    const words: string[] = match[1].trim().split(/\s+/);
+    if (words.length < 1 || words.length > 3) continue;
+    if (!words.every((word) => /^[A-Za-zÇĞİÖŞÜçğıöşü'’-]+$/.test(word))) continue;
+    return words
+      .map((word) => word.charAt(0).toLocaleUpperCase("tr-TR") + word.slice(1).toLocaleLowerCase("tr-TR"))
+      .join(" ");
+  }
+  return null;
 }
 
 async function patchReviewResponse(path: string, body: unknown): Promise<PipelineReviewResponse> {

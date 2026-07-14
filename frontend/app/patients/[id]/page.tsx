@@ -100,7 +100,7 @@ function SessionTypeBadge({ sessionType }: { sessionType: "clinical_note" | "per
 }
 
 function displayPatient(patient: PatientSessions) {
-  return patient.initials?.trim() || patient.external_id?.trim() || "İsimsiz hasta";
+  return patient.display_name?.trim() || patient.initials?.trim() || patient.external_id?.trim() || "İsimsiz hasta";
 }
 
 function ProcedureSummary({ procedures }: { procedures: string[] }) {

@@ -6,9 +6,10 @@ import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.auth import create_access_token, verify_password
 from app.api.audio_pipeline import (
@@ -114,6 +115,7 @@ class LoginResponse(BaseModel):
 class PatientSummaryResponse(BaseModel):
     id: str
     initials: Optional[str] = None
+    display_name: Optional[str] = None
     external_id: Optional[str] = None
     created_at: str
     last_session_at: Optional[str] = None
@@ -134,6 +136,7 @@ class PatientSessionSummaryResponse(BaseModel):
 class PatientSessionsResponse(BaseModel):
     id: str
     initials: Optional[str] = None
+    display_name: Optional[str] = None
     external_id: Optional[str] = None
     created_at: str
     sessions: list[PatientSessionSummaryResponse]
@@ -153,6 +156,15 @@ class ChatResponse(BaseModel):
 class PerioDictationRequest(BaseModel):
     dictation: str
     patient_id: Optional[str] = None
+
+
+class CreatePatientRequest(BaseModel):
+    display_name: Optional[str] = Field(default=None, max_length=255)
+    external_id: Optional[str] = Field(default=None, max_length=128)
+
+
+class AttachPatientRequest(BaseModel):
+    patient_id: str = Field(min_length=1, max_length=128)
 
 
 class PerioExportPayload(BaseModel):
@@ -311,6 +323,41 @@ def list_patients_endpoint(
     ]
 
 
+@patients_router.post("", response_model=PatientSummaryResponse, status_code=201)
+def create_patient_endpoint(
+    request: CreatePatientRequest,
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> PatientSummaryResponse:
+    display_name = request.display_name.strip() if request.display_name else None
+    external_id = request.external_id.strip() if request.external_id else None
+    if not display_name and not external_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Hasta oluşturmak için isim/baş harf veya dosya no alanlarından biri gerekli.",
+        )
+    try:
+        patient = repository.create_patient(
+            f"patient-{uuid4()}",
+            clinic_id=auth.clinic_id,
+            display_name=display_name,
+            external_id=external_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return PatientSummaryResponse(
+        id=patient.id,
+        initials=patient.initials,
+        display_name=patient.display_name,
+        external_id=patient.external_id,
+        created_at=patient.created_at.isoformat(),
+        last_session_at=None,
+        session_count=0,
+        last_procedures=[],
+        status="no_sessions",
+    )
+
+
 @patients_router.get("/{patient_id}/sessions", response_model=PatientSessionsResponse)
 def get_patient_sessions_endpoint(
     patient_id: str,
@@ -399,6 +446,34 @@ def get_session_endpoint(
     if session is None:
         raise HTTPException(status_code=404, detail="Session bulunamadı.")
     return session
+
+
+@router.patch("/{session_id}/patient")
+def attach_patient_to_session_endpoint(
+    session_id: str,
+    request: AttachPatientRequest,
+    repository: SessionRepository = Depends(get_session_repository),
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict[str, str]:
+    try:
+        repository.attach_patient_to_session(
+            session_id,
+            request.patient_id,
+            clinic_id=auth.clinic_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    repository.add_audit_log(
+        user_id=auth.user_id,
+        session_id=session_id,
+        clinic_id=auth.clinic_id,
+        action="patient_attached",
+        entity_type="session",
+        entity_id=session_id,
+        source="manual",
+        metadata_json={"patient_id": request.patient_id},
+    )
+    return {"session_id": session_id, "patient_id": request.patient_id}
 
 
 @router.post("/{session_id}/perio", response_model=PerioSessionResult)

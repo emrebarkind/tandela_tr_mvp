@@ -1,6 +1,7 @@
 export type PatientSummary = {
   id: string;
   initials: string | null;
+  display_name: string | null;
   external_id: string | null;
   created_at: string;
   last_session_at: string | null;
@@ -21,6 +22,7 @@ export type PatientSessionSummary = {
 export type PatientSessions = {
   id: string;
   initials: string | null;
+  display_name: string | null;
   external_id: string | null;
   created_at: string;
   sessions: PatientSessionSummary[];
@@ -47,4 +49,26 @@ export async function fetchPatientSessions(patientId: string): Promise<PatientSe
   });
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<PatientSessions>;
+}
+
+export async function createPatient(input: {
+  display_name?: string | null;
+  external_id?: string | null;
+}): Promise<PatientSummary> {
+  const response = await fetch(`${API_BASE}/patients`, {
+    method: "POST",
+    headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<PatientSummary>;
+}
+
+export async function attachPatientToSession(sessionId: string, patientId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/patient`, {
+    method: "PATCH",
+    headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify({ patient_id: patientId }),
+  });
+  if (!response.ok) throw new Error(await response.text());
 }

@@ -152,7 +152,7 @@ function groupPatients(patients: PatientSummary[]): PatientGroup[] {
 }
 
 function displayPatient(patient: PatientSummary) {
-  return patient.initials?.trim() || patient.external_id?.trim() || "İsimsiz hasta";
+  return patient.display_name?.trim() || patient.initials?.trim() || patient.external_id?.trim() || "İsimsiz hasta";
 }
 
 function ProcedureSummary({ procedures }: { procedures: string[] }) {

@@ -76,6 +76,47 @@ class SessionRepository:
             self.db.flush()
         return record
 
+    def create_patient(
+        self,
+        patient_id: str,
+        *,
+        clinic_id: str,
+        display_name: Optional[str] = None,
+        external_id: Optional[str] = None,
+    ) -> Patient:
+        self.ensure_clinic(clinic_id)
+        if external_id:
+            existing = self.db.scalar(
+                select(Patient).where(
+                    Patient.clinic_id == clinic_id,
+                    Patient.external_id == external_id,
+                )
+            )
+            if existing is not None:
+                raise ValueError("Bu dosya numarası aynı klinikte zaten kullanılıyor.")
+        record = Patient(
+            id=patient_id,
+            clinic_id=clinic_id,
+            display_name=display_name,
+            external_id=external_id,
+        )
+        self.db.add(record)
+        self.db.flush()
+        return record
+
+    def attach_patient_to_session(
+        self,
+        session_id: str,
+        patient_id: str,
+        *,
+        clinic_id: str,
+    ) -> Session:
+        session = self._require_session_in_clinic(session_id, clinic_id)
+        self._require_patient_in_clinic(patient_id, clinic_id)
+        session.patient_id = patient_id
+        self.db.flush()
+        return session
+
     def upsert_session(
         self,
         session_id: str,
@@ -452,7 +493,13 @@ class SessionRepository:
         stmt = select(Patient).where(Patient.clinic_id == clinic_id)
         if query:
             like = f"%{query.strip()}%"
-            stmt = stmt.where(or_(Patient.initials.ilike(like), Patient.external_id.ilike(like)))
+            stmt = stmt.where(
+                or_(
+                    Patient.display_name.ilike(like),
+                    Patient.initials.ilike(like),
+                    Patient.external_id.ilike(like),
+                )
+            )
         patients = list(self.db.scalars(stmt))
         return [self._patient_summary(patient) for patient in patients]
 
@@ -466,6 +513,7 @@ class SessionRepository:
         return {
             "id": patient.id,
             "initials": patient.initials,
+            "display_name": patient.display_name,
             "external_id": patient.external_id,
             "created_at": patient.created_at.isoformat(),
             "sessions": [self._session_summary(session) for session in sessions],
@@ -480,6 +528,7 @@ class SessionRepository:
         return {
             "id": patient.id,
             "initials": patient.initials,
+            "display_name": patient.display_name,
             "external_id": patient.external_id,
             "created_at": patient.created_at.isoformat(),
             "last_session_at": latest.started_at.isoformat() if latest is not None else None,
