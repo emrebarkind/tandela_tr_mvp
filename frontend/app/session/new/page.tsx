@@ -8,17 +8,20 @@ import { useHeader } from "@/components/app/HeaderContext";
 import { ApprovedExport } from "@/components/review/ApprovedExport";
 import { DentalChartPanel } from "@/components/review/DentalChartPanel";
 import { LiveTranscriptRecorder } from "@/components/review/LiveTranscriptRecorder";
+import type { MedicalHistory, PatientInformation } from "@/components/review/PatientRecordPanel";
 import { TranscriptDrawer } from "@/components/review/TranscriptDrawer";
 import { Badge } from "@/components/ui/badge";
 import { DraftBadge } from "@/components/ui/draft-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { attachPatientToSession, createPatient, fetchPatients, type PatientSummary } from "@/lib/patients-api";
+import { parsePatientRecordEditCommand } from "@/lib/patient-record-edit";
 import type { PerioSessionResult } from "@/components/review/PerioChartPanel";
 
 type Role = "dentist" | "patient" | "assistant_or_other" | "unknown";
@@ -86,6 +89,8 @@ type NoteSentence = {
 };
 
 type ClinicalNote = {
+  patient_information: PatientInformation;
+  medical_history: MedicalHistory;
   patient_complaint: NoteSentence[];
   history: NoteSentence[];
   clinical_findings: NoteSentence[];
@@ -418,6 +423,7 @@ function ReviewPageContent() {
     setIsLoading(true);
     setError(null);
     setAudioStatus("Canlı transkript gelmedi; ses kaydı batch ASR ile işleniyor.");
+    let isRedirecting = false;
     try {
       const form = new FormData();
       form.append("audio", audioBlob, `${sessionId}.webm`);
@@ -427,13 +433,14 @@ function ReviewPageContent() {
       if (audioTranscript.length) {
         updateTranscriptText(audioTranscript.map((utterance) => `${utterance.speaker_id}: ${utterance.text}`).join("\n"));
       }
-      applyBackendResponse(result, audioTranscript.map((utterance) => ({ speaker_id: utterance.speaker_id, text: utterance.text })));
-      setAudioStatus("Ses işlendi; taslak incelemeye hazır.");
+      isRedirecting = true;
+      setAudioStatus("Ses işlendi; inceleme ekranı açılıyor.");
+      router.push(`/session/${encodeURIComponent(result.session_id)}`);
     } catch (caught) {
       setError(errorMessage(caught));
       setAudioStatus("Ses batch ASR ile işlenemedi. Transkripti elle girip Analiz Et ile devam edebilirsiniz.");
     } finally {
-      setIsLoading(false);
+      if (!isRedirecting) setIsLoading(false);
     }
   }
 
@@ -521,13 +528,15 @@ function ReviewPageContent() {
     setEditCommand("");
     setEditMessage(null);
     setExportMessage(null);
+    let isRedirecting = false;
     try {
       const result = await runTranscriptAnalysis(utterances);
-      applyBackendResponse(result, utterances);
+      isRedirecting = true;
+      router.push(`/session/${encodeURIComponent(result.session_id)}`);
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
-      setIsLoading(false);
+      if (!isRedirecting) setIsLoading(false);
     }
   }
 
@@ -721,12 +730,30 @@ function ReviewPageContent() {
     });
   }
 
+  function updatePatientField(field: keyof PatientInformation, value: string) {
+    setEditableNote((current) => current ? ({ ...current, patient_information: { ...current.patient_information, [field]: value.trim() ? manualTextField(value) : null } }) : current);
+  }
+
+  function updateMedicalHistory(field: keyof MedicalHistory, value: boolean | null, detail: string) {
+    setEditableNote((current) => current ? ({ ...current, medical_history: { ...current.medical_history, [field]: value === null && !detail.trim() ? null : manualMedicalField(value, detail) } }) : current);
+  }
+
   function applyEditCommand() {
     const command = editCommand.trim();
     if (!command || !displayedNote) return;
+    const patientCorrection = parsePatientRecordEditCommand(command);
     const chartProcedure = parseDentalChartCommand(command);
     setEditableNote((current) => {
       if (!current) return current;
+      if (patientCorrection) {
+        return {
+          ...current,
+          patient_information: {
+            ...current.patient_information,
+            [patientCorrection.field]: manualTextField(patientCorrection.value),
+          },
+        };
+      }
       return {
         ...current,
         procedures_note: [
@@ -739,7 +766,9 @@ function ReviewPageContent() {
         ],
       };
     });
-    if (chartProcedure) {
+    if (patientCorrection) {
+      setEditMessage(`${patientCorrection.label} hasta kaydında güncellendi.`);
+    } else if (chartProcedure) {
       setManualChartProcedures((current) => [...current, chartProcedure]);
       setEditMessage("Düzeltme not taslağına eklendi ve diş şeması taslak olarak güncellendi.");
     } else {
@@ -991,28 +1020,7 @@ function ReviewPageContent() {
               </div>
             ) : null}
 
-            {hasAnalysisDraft && displayedNote ? (
-              <motion.div initial="hidden" animate="show" variants={analysisContainerVariants}>
-                <SmartReviewWorkspace
-                  chartProcedures={chartProcedures}
-                  procedures={procedures}
-                  noteSections={noteSections}
-                  uncertainItems={dentistReview?.uncertain_items ?? []}
-                  selectedCode={selectedCode}
-                  onSelectedCodeChange={setSelectedCode}
-                  approved={approved}
-                  isLoading={false}
-                  editCommand={editCommand}
-                  editMessage={editMessage}
-                  onEditCommandChange={setEditCommand}
-                  onApplyEditCommand={applyEditCommand}
-                  onDictateEditCommand={startEditDictation}
-                  onAddFinding={addManualFinding}
-                />
-              </motion.div>
-            ) : (
-              <AnalysisSkeleton isLoading={isLoading} hasTranscript={Boolean(transcriptText.trim())} />
-            )}
+            <AnalysisSkeleton isLoading={isLoading} hasTranscript={Boolean(transcriptText.trim())} />
           </div>
         </section>
       </div>
@@ -1407,9 +1415,25 @@ function StatusPill({ label }: { label: string }) {
 }
 
 function AnalysisSkeleton({ isLoading, hasTranscript }: { isLoading: boolean; hasTranscript: boolean }) {
-  const title = isLoading ? "Analiz hazırlanıyor" : hasTranscript ? "Analiz için hazır" : "Kayıt bekleniyor";
+  const [analysisElapsedSec, setAnalysisElapsedSec] = useState(0);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setAnalysisElapsedSec(0);
+      return;
+    }
+
+    const startedAt = performance.now();
+    const updateElapsed = () => setAnalysisElapsedSec((performance.now() - startedAt) / 1000);
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 250);
+    return () => window.clearInterval(timer);
+  }, [isLoading]);
+
+  const stage = estimatedAnalysisStage(analysisElapsedSec);
+  const title = isLoading ? stage.label : hasTranscript ? "Analiz için hazır" : "Kayıt bekleniyor";
   const subtitle = isLoading
-    ? "Backend batch pipeline tamamlanana kadar gerçek içerik gösterilmeyecek."
+    ? "Kayıt güvenli batch pipeline içinde işleniyor. Sonuç tamamlandığında inceleme ekranı açılacak."
     : hasTranscript
       ? "Analiz Et ile klinik not, diş şeması ve kod taslağı üretilecek."
       : "Sol panelde konuşma başladığında transkript burada analiz bekleyecek.";
@@ -1418,8 +1442,25 @@ function AnalysisSkeleton({ isLoading, hasTranscript }: { isLoading: boolean; ha
     <div className="space-y-5">
       <Card className="border-border bg-background shadow-card">
         <CardHeader className="border-b border-border px-5 py-4">
-          <CardTitle className="text-base font-semibold tracking-tight text-foreground">{title}</CardTitle>
+          <div className="flex items-center justify-between gap-4">
+            <CardTitle className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground">
+              {isLoading ? <Loader2 className="size-4 animate-spin text-primary" aria-hidden="true" /> : null}
+              <span aria-live="polite">{title}</span>
+            </CardTitle>
+            {isLoading ? (
+              <span className="text-xs tabular-nums text-muted-foreground">{Math.floor(analysisElapsedSec)} sn</span>
+            ) : null}
+          </div>
           <p className="mt-1 text-sm leading-6 text-muted-foreground">{subtitle}</p>
+          {isLoading ? (
+            <div className="mt-4 space-y-2">
+              <Progress value={stage.progress} aria-label="Tahmini analiz ilerlemesi" />
+              <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                <span>Tahmini aşama</span>
+                <span>Taslak tamamlanana kadar bu ekranda kalabilirsiniz.</span>
+              </div>
+            </div>
+          ) : null}
         </CardHeader>
         <CardContent className="space-y-4 p-5">
           <div className="rounded-2xl border border-border bg-card p-4">
@@ -1455,10 +1496,43 @@ function AnalysisSkeleton({ isLoading, hasTranscript }: { isLoading: boolean; ha
   );
 }
 
+function estimatedAnalysisStage(elapsedSec: number) {
+  if (elapsedSec < 5) {
+    return {
+      label: "Konuşmacılar belirleniyor...",
+      progress: 6 + (elapsedSec / 5) * 10,
+    };
+  }
+  if (elapsedSec < 25) {
+    return {
+      label: "Klinik bulgular çıkarılıyor...",
+      progress: 16 + ((elapsedSec - 5) / 20) * 42,
+    };
+  }
+  if (elapsedSec < 35) {
+    return {
+      label: "Not ve diş şeması hazırlanıyor...",
+      progress: 58 + ((elapsedSec - 25) / 10) * 20,
+    };
+  }
+  if (elapsedSec < 44) {
+    return {
+      label: "İşlem kodları eşleştiriliyor...",
+      progress: 78 + ((elapsedSec - 35) / 9) * 14,
+    };
+  }
+  return {
+    label: "İşlem kodları eşleştiriliyor...",
+    progress: Math.min(96, 92 + ((elapsedSec - 44) / 16) * 4),
+  };
+}
+
 function SmartReviewWorkspace({
   chartProcedures,
   procedures,
   noteSections,
+  patientInformation,
+  medicalHistory,
   uncertainItems,
   selectedCode,
   onSelectedCodeChange,
@@ -1470,10 +1544,14 @@ function SmartReviewWorkspace({
   onApplyEditCommand,
   onDictateEditCommand,
   onAddFinding,
+  onPatientFieldChange,
+  onMedicalHistoryChange,
 }: {
   chartProcedures: ProcedureObject[];
   procedures: ProcedureReview[];
   noteSections: NoteSection[];
+  patientInformation: PatientInformation;
+  medicalHistory: MedicalHistory;
   uncertainItems: string[];
   selectedCode: string;
   onSelectedCodeChange: (code: string) => void;
@@ -1485,6 +1563,8 @@ function SmartReviewWorkspace({
   onApplyEditCommand: () => void;
   onDictateEditCommand: () => void;
   onAddFinding: (finding: { tooth_number_fdi: number; condition: ManualDentalCondition; note?: string }) => Promise<void>;
+  onPatientFieldChange: (field: keyof PatientInformation, value: string) => void;
+  onMedicalHistoryChange: (field: keyof MedicalHistory, value: boolean | null, detail: string) => void;
 }) {
   const [verifiedNotes, setVerifiedNotes] = useState<Record<string, boolean>>({});
   const [verifiedCodes, setVerifiedCodes] = useState<Record<string, boolean>>({});
@@ -1544,6 +1624,7 @@ function SmartReviewWorkspace({
             </div>
           </CardHeader>
           <CardContent className="max-h-[420px] space-y-3 overflow-y-auto p-5">
+            <CompactPatientDraft patientInformation={patientInformation} medicalHistory={medicalHistory} onPatientFieldChange={onPatientFieldChange} onMedicalHistoryChange={onMedicalHistoryChange} />
             {noteCards.length ? noteCards.map((card, index) => (
               <motion.div
                 key={card.key}
@@ -1696,6 +1777,32 @@ function SmartReviewWorkspace({
       </div>
     </TooltipProvider>
   );
+}
+
+function CompactPatientDraft({ patientInformation, medicalHistory, onPatientFieldChange, onMedicalHistoryChange }: {
+  patientInformation: PatientInformation;
+  medicalHistory: MedicalHistory;
+  onPatientFieldChange: (field: keyof PatientInformation, value: string) => void;
+  onMedicalHistoryChange: (field: keyof MedicalHistory, value: boolean | null, detail: string) => void;
+}) {
+  const identityFields: Array<[keyof PatientInformation, string]> = [["display_name", "Ad / Soyad"], ["age", "Yaş"], ["occupation", "Meslek"]];
+  const historyFields: Array<[keyof MedicalHistory, string]> = [["chronic_illness", "Kronik hastalık"], ["regular_medication", "Düzenli ilaç"], ["drug_allergy", "İlaç alerjisi"], ["contagious_disease", "Bulaşıcı hastalık"]];
+  return <div className="space-y-4 rounded-2xl border border-border bg-card/70 p-4">
+    <div><p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Hasta Bilgileri</p><div className="mt-3 grid gap-3">
+      {identityFields.map(([field, label]) => { const item = patientInformation[field]; return <label key={field} className="text-xs font-medium text-foreground"><span>{label}</span><Input className="mt-1.5 h-9" value={item?.value ?? ""} onChange={(event) => onPatientFieldChange(field, event.target.value)} />{item?.source_quote ? <span className="mt-1 block italic text-muted-foreground">Kaynak: {item.source_quote}</span> : null}</label>; })}
+    </div></div>
+    <div><p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Tıbbi Özgeçmiş</p><div className="mt-3 space-y-2">
+      {historyFields.map(([field, label]) => { const item = medicalHistory[field]; return <div key={field} className="grid grid-cols-[1fr_110px] gap-2"><span className="text-xs text-foreground">{label}</span><select className="h-8 rounded-lg border border-border bg-background px-2 text-xs" value={item?.value === true ? "yes" : item?.value === false ? "no" : ""} onChange={(event) => onMedicalHistoryChange(field, event.target.value === "yes" ? true : event.target.value === "no" ? false : null, item?.detail ?? "")}><option value="">—</option><option value="yes">Var</option><option value="no">Yok</option></select>{item?.detail ? <Input className="col-span-2 h-8 text-xs" value={item.detail} onChange={(event) => onMedicalHistoryChange(field, item.value ?? null, event.target.value)} /> : null}{item?.source_quote ? <span className="col-span-2 text-xs italic text-muted-foreground">Kaynak: {item.source_quote}</span> : null}</div>; })}
+    </div></div>
+  </div>;
+}
+
+function manualTextField(value: string) {
+  return { value, source_quote: "Hekim tarafından manuel eklendi", source_role: "dentist" as const, source_speaker: "manual", is_uncertain: false };
+}
+
+function manualMedicalField(value: boolean | null, detail: string) {
+  return { value, detail: detail.trim() || null, source_quote: "Hekim tarafından manuel eklendi", source_role: "dentist" as const, source_speaker: "manual", is_uncertain: false };
 }
 
 function LivingVoiceOrb({ active, highlightedSource }: { active: boolean; highlightedSource: { label: string; quote: string } | null }) {

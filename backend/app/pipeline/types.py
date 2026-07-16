@@ -229,9 +229,47 @@ class ClinicalFact(BaseModel):
     is_uncertain: bool = False  # "şüpheli/gerekebilir/olabilir" → True, asla kesinleştirilmez
 
 
+class SourcedTextField(BaseModel):
+    value: str
+    source_quote: str
+    source_role: DentistRole
+    source_speaker: str
+    is_uncertain: bool = False
+
+
+class SourcedMedicalHistoryField(BaseModel):
+    value: Optional[bool] = None
+    detail: Optional[str] = None
+    source_quote: str
+    source_role: DentistRole
+    source_speaker: str
+    is_uncertain: bool = False
+
+
+class PatientInformationDraft(BaseModel):
+    display_name: Optional[SourcedTextField] = None
+    age: Optional[SourcedTextField] = None
+    national_id: Optional[SourcedTextField] = None
+    date_of_birth: Optional[SourcedTextField] = None
+    occupation: Optional[SourcedTextField] = None
+    address: Optional[SourcedTextField] = None
+    phone: Optional[SourcedTextField] = None
+    email: Optional[SourcedTextField] = None
+    referred_by: Optional[SourcedTextField] = None
+
+
+class PatientMedicalHistoryDraft(BaseModel):
+    chronic_illness: Optional[SourcedMedicalHistoryField] = None
+    regular_medication: Optional[SourcedMedicalHistoryField] = None
+    drug_allergy: Optional[SourcedMedicalHistoryField] = None
+    contagious_disease: Optional[SourcedMedicalHistoryField] = None
+
+
 class ClinicalFactsBundle(BaseModel):
     session_id: str
     facts: list[ClinicalFact] = Field(default_factory=list)
+    patient_information: PatientInformationDraft = Field(default_factory=PatientInformationDraft)
+    medical_history: PatientMedicalHistoryDraft = Field(default_factory=PatientMedicalHistoryDraft)
     uncertain_items: list[str] = Field(default_factory=list)
 
 
@@ -259,6 +297,8 @@ class NoteSentence(BaseModel):
 
 class ClinicalNoteDraft(BaseModel):
     session_id: str
+    patient_information: PatientInformationDraft = Field(default_factory=PatientInformationDraft)
+    medical_history: PatientMedicalHistoryDraft = Field(default_factory=PatientMedicalHistoryDraft)
     patient_complaint: list[NoteSentence] = Field(default_factory=list)
     history: list[NoteSentence] = Field(default_factory=list)
     clinical_findings: list[NoteSentence] = Field(default_factory=list)

@@ -59,10 +59,33 @@ HARD RULES:
    but sufficient. Do not paraphrase source_quote.
    If one dentist utterance contains linked findings or linked plan clauses,
    keep the linked clauses in one fact/source_quote instead of splitting them.
-10. Output JSON only. No prose, no markdown, no explanation outside the JSON.
+10. Extract optional patient identity and medical-history answers only when
+   explicitly stated. Each populated field must carry its own exact
+   source_quote, source_role, and source_speaker. Missing or unclear fields are
+   null. Never derive date_of_birth from age: "otuz bes yasindayim" supports
+   age only, not a birth date. Medical-history answers must reflect the
+   patient's answer as stated; do not interpret or clinically confirm it.
+11. Output JSON only. No prose, no markdown, no explanation outside the JSON.
    Use EXACTLY this top-level shape:
 
    {
+     "patient_information": {
+       "display_name": null,
+       "age": null,
+       "national_id": null,
+       "date_of_birth": null,
+       "occupation": null,
+       "address": null,
+       "phone": null,
+       "email": null,
+       "referred_by": null
+     },
+     "medical_history": {
+       "chronic_illness": null,
+       "regular_medication": null,
+       "drug_allergy": null,
+       "contagious_disease": null
+     },
      "facts": [
        {
          "category": "patient_complaint | history | clinical_findings | procedures | treatment_plan | assessment",
@@ -97,6 +120,18 @@ CATEGORY GUIDANCE:
   "supheli", and "degerlendirecegiz" with `is_uncertain=true`.
 - treatment_plan: dentist plan or next step only.
 - procedures: dentist-stated current-session or planned procedure object only.
+
+STRUCTURED FIELD SHAPES:
+- A populated patient_information field is:
+  {"value":"...","source_quote":"exact quote","source_role":"patient",
+   "source_speaker":"B","is_uncertain":false}
+- A populated medical_history field is:
+  {"value":true|false|null,"detail":"exact stated detail or null",
+   "source_quote":"exact quote","source_role":"patient",
+   "source_speaker":"B","is_uncertain":false}
+- "Düzenli tansiyon ilacı kullanıyorum" supports regular_medication.value=true
+  and detail="tansiyon ilacı". "Alerjim yok" supports
+  drug_allergy.value=false. Do not infer disease, drug names, or dates.
 
 IMPORTANT EDGE CASES:
 - "Benim disim iltihapli mi?" is a patient concern/question, not infection.
@@ -136,6 +171,23 @@ Each utterance includes `speaker_id`, `role`, and `text`.
 
 ```json
 {
+  "patient_information": {
+    "display_name": null,
+    "age": null,
+    "national_id": null,
+    "date_of_birth": null,
+    "occupation": null,
+    "address": null,
+    "phone": null,
+    "email": null,
+    "referred_by": null
+  },
+  "medical_history": {
+    "chronic_illness": null,
+    "regular_medication": null,
+    "drug_allergy": null,
+    "contagious_disease": null
+  },
   "facts": [
     {
       "category": "patient_complaint",
@@ -156,6 +208,9 @@ Each utterance includes `speaker_id`, `role`, and `text`.
 - `facts` top-level anahtari zorunludur.
 - Her fact `source_quote`, `source_role`, `source_speaker` tasir; provenance'siz
   fact yoktur.
+- Dolu kimlik/özgeçmiş alanları da aynı provenance alanlarını taşır; kanıtsız
+  alan `null` kalır.
+- Yaştan doğum tarihi hesaplanmaz.
 - `source_quote` transkriptte birebir gecmelidir.
 - `tooth_number_fdi` yalnizca guvenli FDI ise doludur; aksi halde `null`.
 - `status` yalnizca procedure fact'lerinde dolu olmalidir; digerlerinde `null`.

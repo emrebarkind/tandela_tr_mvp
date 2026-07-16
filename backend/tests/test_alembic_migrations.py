@@ -71,12 +71,15 @@ class AlembicMigrationTests(unittest.TestCase):
                 self.assertIn("clinics", tables)
                 self.assertIn("users", tables)
                 self.assertIn("patients", tables)
+                self.assertIn("patient_medical_histories", tables)
                 self.assertIn("sessions", tables)
                 self.assertIn("transcripts", tables)
                 self.assertIn("clinical_notes", tables)
                 self.assertIn("procedure_codes", tables)
                 self.assertIn("code_suggestions", tables)
                 self.assertIn("audit_logs", tables)
+                patient_columns = {column["name"] for column in inspect(engine).get_columns("patients")}
+                self.assertTrue({"national_id", "date_of_birth", "occupation", "address", "phone", "email", "referred_by"}.issubset(patient_columns))
             finally:
                 engine.dispose()
 

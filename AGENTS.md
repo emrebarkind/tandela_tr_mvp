@@ -118,6 +118,10 @@ uydurmaz) → hekim seçer.
 - Sağlayıcılarla DPA; ses/metin **model eğitimi için kullanılmaz** (sözleşmede).
 - Hasta verisi minimum: MVP'de hasta adı zorunlu değil; anonim session / opsiyonel
   baş harf.
+- V1'de opsiyonel hasta kimlik ve tıbbi özgeçmiş alanları uygulama DB'sinde düz
+  metin tutulur; alan-seviyesi şifreleme henüz yoktur ve sonraki güvenlik
+  aşamasında eklenecektir. Bu bilinçli kısıt gerçek klinik kullanım öncesi
+  kapatılmalıdır.
 - Klinik bazlı veri izolasyonu + role-based access control.
 - Audit log: kim, neyi, ne zaman; değişiklik kaynağı `ai`/`voice`/`manual`.
 

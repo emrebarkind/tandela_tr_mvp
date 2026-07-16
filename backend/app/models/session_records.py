@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Literal, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, JSON, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.database import Base
@@ -50,10 +50,36 @@ class Patient(Base):
     external_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     initials: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    national_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    date_of_birth: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    occupation: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    referred_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     clinic: Mapped[Clinic] = relationship(back_populates="patients")
     sessions: Mapped[list["Session"]] = relationship(back_populates="patient")
+    medical_history: Mapped[Optional["PatientMedicalHistory"]] = relationship(
+        back_populates="patient", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class PatientMedicalHistory(Base):
+    __tablename__ = "patient_medical_histories"
+
+    patient_id: Mapped[str] = mapped_column(ForeignKey("patients.id"), primary_key=True)
+    has_chronic_illness: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    chronic_illness_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    takes_regular_medication: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    regular_medication_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    has_drug_allergy: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    drug_allergy_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    has_contagious_disease: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    contagious_disease_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    patient: Mapped[Patient] = relationship(back_populates="medical_history")
 
 
 class Session(Base):

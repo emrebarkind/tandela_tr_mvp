@@ -331,6 +331,10 @@ function preferredMimeType() {
 }
 
 function wsBase(apiBase: string) {
+  if (apiBase.startsWith("/")) {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}${apiBase}`;
+  }
   if (apiBase.startsWith("https://")) return apiBase.replace("https://", "wss://");
   if (apiBase.startsWith("http://")) return apiBase.replace("http://", "ws://");
   return apiBase;

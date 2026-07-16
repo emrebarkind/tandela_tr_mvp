@@ -217,6 +217,13 @@ class SessionPipelineApiTests(unittest.TestCase):
             initials=None,
             display_name="Ayşe Yılmaz",
             external_id="DOSYA-42",
+            national_id=None,
+            date_of_birth=None,
+            occupation=None,
+            address=None,
+            phone=None,
+            email=None,
+            referred_by=None,
             created_at=datetime.now(timezone.utc),
         )
 

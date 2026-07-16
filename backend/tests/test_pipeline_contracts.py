@@ -17,6 +17,8 @@ from app.pipeline.types import (
     FactCategory,
     ProcedureStatus,
     RoleStatus,
+    RoleLabelledTranscript,
+    RoleLabelledUtterance,
     SpeakerLabelledTranscript,
     SurfaceCount,
     ToothGroup,
@@ -45,6 +47,47 @@ class ScriptedLLM(LLMProvider):
 
 
 class PipelineContractTests(unittest.TestCase):
+    def test_patient_identity_and_medical_history_preserve_sources_without_deriving_birth_date(self) -> None:
+        transcript = RoleLabelledTranscript(
+            session_id="identity-history",
+            utterances=[
+                RoleLabelledUtterance(speaker_id="A", role=DentistRole.DENTIST, text="Tıbbi geçmişiniz ve alerjiniz var mı?", start_sec=0, end_sec=1),
+                RoleLabelledUtterance(speaker_id="B", role=DentistRole.PATIENT, text="Adım Ayşe Yılmaz, otuz beş yaşındayım, öğretmenim. Düzenli tansiyon ilacı kullanıyorum, alerjim yok.", start_sec=1, end_sec=5),
+            ],
+        )
+        facts_llm = ScriptedLLM([{
+            "patient_information": {
+                "display_name": {"value": "Ayşe Yılmaz", "source_quote": "Adım Ayşe Yılmaz", "source_role": "patient", "source_speaker": "B", "is_uncertain": False},
+                "age": {"value": "35", "source_quote": "otuz beş yaşındayım", "source_role": "patient", "source_speaker": "B", "is_uncertain": False},
+                "date_of_birth": {"value": "1991-01-01", "source_quote": "otuz beş yaşındayım", "source_role": "patient", "source_speaker": "B", "is_uncertain": False},
+                "occupation": {"value": "öğretmen", "source_quote": "öğretmenim", "source_role": "patient", "source_speaker": "B", "is_uncertain": False},
+            },
+            "medical_history": {
+                "regular_medication": {"value": True, "detail": "tansiyon ilacı", "source_quote": "Düzenli tansiyon ilacı kullanıyorum", "source_role": "patient", "source_speaker": "B", "is_uncertain": False},
+                "drug_allergy": {"value": False, "detail": None, "source_quote": "alerjim yok", "source_role": "patient", "source_speaker": "B", "is_uncertain": False},
+            },
+            "facts": [],
+            "uncertain_items": [],
+        }])
+
+        facts = stages.extract_clinical_facts(transcript, facts_llm)
+
+        self.assertEqual(facts.patient_information.display_name.value, "Ayşe Yılmaz")
+        self.assertEqual(facts.patient_information.age.value, "35")
+        self.assertEqual(facts.patient_information.occupation.value, "öğretmen")
+        self.assertIsNone(facts.patient_information.date_of_birth)
+        self.assertTrue(any("doğum tarihine çevrilmedi" in item for item in facts.uncertain_items))
+        self.assertIs(facts.medical_history.regular_medication.value, True)
+        self.assertEqual(facts.medical_history.regular_medication.detail, "tansiyon ilacı")
+        self.assertIs(facts.medical_history.drug_allergy.value, False)
+
+        note = stages.generate_clinical_note(facts, ScriptedLLM([{
+            "patient_complaint": [], "history": [], "clinical_findings": [], "assessment": [],
+            "treatment_plan": [], "procedures_note": [], "uncertain_items": facts.uncertain_items, "is_draft": True,
+        }]))
+        self.assertEqual(note.patient_information, facts.patient_information)
+        self.assertEqual(note.medical_history, facts.medical_history)
+
     def test_perio_site_mapping_preserves_mb_db_booleans_and_site_recession(self) -> None:
         llm = ScriptedLLM(
             [

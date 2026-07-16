@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
@@ -60,6 +62,7 @@ chat_router = APIRouter(prefix="/chat", tags=["chat"])
 _ENGINE = create_database_engine()
 _SESSION_FACTORY = create_session_factory(_ENGINE)
 _DATABASE_INITIALIZED = False
+logger = logging.getLogger(__name__)
 
 
 @health_router.get("/health")
@@ -117,6 +120,13 @@ class PatientSummaryResponse(BaseModel):
     initials: Optional[str] = None
     display_name: Optional[str] = None
     external_id: Optional[str] = None
+    national_id: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    occupation: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    referred_by: Optional[str] = None
     created_at: str
     last_session_at: Optional[str] = None
     session_count: int
@@ -138,6 +148,13 @@ class PatientSessionsResponse(BaseModel):
     initials: Optional[str] = None
     display_name: Optional[str] = None
     external_id: Optional[str] = None
+    national_id: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    occupation: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    referred_by: Optional[str] = None
     created_at: str
     sessions: list[PatientSessionSummaryResponse]
 
@@ -161,6 +178,13 @@ class PerioDictationRequest(BaseModel):
 class CreatePatientRequest(BaseModel):
     display_name: Optional[str] = Field(default=None, max_length=255)
     external_id: Optional[str] = Field(default=None, max_length=128)
+    national_id: Optional[str] = Field(default=None, max_length=32)
+    date_of_birth: Optional[date] = None
+    occupation: Optional[str] = Field(default=None, max_length=255)
+    address: Optional[str] = None
+    phone: Optional[str] = Field(default=None, max_length=64)
+    email: Optional[str] = Field(default=None, max_length=255)
+    referred_by: Optional[str] = Field(default=None, max_length=255)
 
 
 class AttachPatientRequest(BaseModel):
@@ -266,19 +290,27 @@ def _save_clinical_review_snapshot(
     response: Optional[PipelineReviewResponse] = None,
 ) -> PipelineReviewResponse:
     review = response or to_review_response(result)
-    repository.save_review_snapshot(
-        result.session_id,
-        {
-            "snapshot_version": 1,
-            "session_id": result.session_id,
-            "session_type": "clinical_note",
-            "transcript": _transcript_snapshot(result),
-            "clinical_review": review.model_dump(mode="json"),
-            "clinical_pipeline": result.model_dump(mode="json"),
-            "perio_result": None,
-        },
-        clinic_id=clinic_id,
-    )
+    started_at = time.time()
+    try:
+        repository.save_review_snapshot(
+            result.session_id,
+            {
+                "snapshot_version": 1,
+                "session_id": result.session_id,
+                "session_type": "clinical_note",
+                "transcript": _transcript_snapshot(result),
+                "clinical_review": review.model_dump(mode="json"),
+                "clinical_pipeline": result.model_dump(mode="json"),
+                "perio_result": None,
+            },
+            clinic_id=clinic_id,
+        )
+    finally:
+        logger.warning(
+            "pipeline_timing stage=review_snapshot_json session_id=%s duration_sec=%.3f",
+            result.session_id,
+            time.time() - started_at,
+        )
     return review
 
 
@@ -342,6 +374,13 @@ def create_patient_endpoint(
             clinic_id=auth.clinic_id,
             display_name=display_name,
             external_id=external_id,
+            national_id=request.national_id,
+            date_of_birth=request.date_of_birth,
+            occupation=request.occupation,
+            address=request.address,
+            phone=request.phone,
+            email=request.email,
+            referred_by=request.referred_by,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -350,6 +389,13 @@ def create_patient_endpoint(
         initials=patient.initials,
         display_name=patient.display_name,
         external_id=patient.external_id,
+        national_id=patient.national_id,
+        date_of_birth=patient.date_of_birth.isoformat() if patient.date_of_birth else None,
+        occupation=patient.occupation,
+        address=patient.address,
+        phone=patient.phone,
+        email=patient.email,
+        referred_by=patient.referred_by,
         created_at=patient.created_at.isoformat(),
         last_session_at=None,
         session_count=0,

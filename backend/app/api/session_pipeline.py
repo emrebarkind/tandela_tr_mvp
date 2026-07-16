@@ -572,6 +572,39 @@ def _format_note_for_export(note: Optional[ClinicalNoteDraft]) -> str:
     if note is None:
         return ""
 
+    lines: list[str] = []
+    patient_fields = [
+        ("Ad / Soyad", note.patient_information.display_name),
+        ("Yaş", note.patient_information.age),
+        ("T.C. Kimlik No", note.patient_information.national_id),
+        ("Doğum tarihi", note.patient_information.date_of_birth),
+        ("Meslek", note.patient_information.occupation),
+        ("Adres", note.patient_information.address),
+        ("Telefon", note.patient_information.phone),
+        ("E-posta", note.patient_information.email),
+        ("Yönlendiren", note.patient_information.referred_by),
+    ]
+    if any(field is not None for _, field in patient_fields):
+        lines.append("Hasta Bilgileri")
+        lines.extend(f"- {label}: {field.value}" for label, field in patient_fields if field is not None)
+        lines.append("")
+
+    medical_fields = [
+        ("Kronik hastalık", note.medical_history.chronic_illness),
+        ("Düzenli ilaç", note.medical_history.regular_medication),
+        ("İlaç alerjisi", note.medical_history.drug_allergy),
+        ("Bulaşıcı hastalık", note.medical_history.contagious_disease),
+    ]
+    if any(field is not None for _, field in medical_fields):
+        lines.append("Tıbbi Özgeçmiş")
+        for label, field in medical_fields:
+            if field is None:
+                continue
+            answer = "Var / Evet" if field.value is True else "Yok / Hayır" if field.value is False else "Belirsiz"
+            detail = f" — {field.detail}" if field.detail else ""
+            lines.append(f"- {label}: {answer}{detail}")
+        lines.append("")
+
     sections = [
         ("Hasta şikayeti", note.patient_complaint),
         ("Geçmiş", note.history),
@@ -580,7 +613,6 @@ def _format_note_for_export(note: Optional[ClinicalNoteDraft]) -> str:
         ("Tedavi planı", note.treatment_plan),
         ("İşlem notu", note.procedures_note),
     ]
-    lines: list[str] = []
     for title, sentences in sections:
         if not sentences:
             continue

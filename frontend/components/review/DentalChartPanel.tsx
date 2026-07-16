@@ -283,7 +283,12 @@ function adaptProceduresToChart(procedures: ProcedureObject[]) {
     });
     if (tooth) {
       const group = grouped.get(colorKey) ?? { labelKey: colorKey, teeth: new Set<string>() };
-      group.teeth.add(`teeth-${tooth}`);
+      const visualTooth = tooth >= 31 && tooth <= 38
+        ? tooth + 10
+        : tooth >= 41 && tooth <= 48
+          ? tooth - 10
+          : tooth;
+      group.teeth.add(`teeth-${visualTooth}`);
       grouped.set(colorKey, group);
     }
   });

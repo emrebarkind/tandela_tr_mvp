@@ -504,6 +504,8 @@ def extract_clinical_facts(transcript: RoleLabelledTranscript, llm: LLMProvider)
             {
                 "session_id": transcript.session_id,
                 "facts": data["facts"],
+                "patient_information": data["patient_information"],
+                "medical_history": data["medical_history"],
                 "uncertain_items": data["uncertain_items"],
             }
         )
@@ -518,7 +520,13 @@ def extract_clinical_facts(transcript: RoleLabelledTranscript, llm: LLMProvider)
         )
         return _fallback_clinical_facts_from_transcript(transcript)
 
-    return _enforce_source_role_invariant(facts)
+    safe_facts = _enforce_source_role_invariant(facts)
+    return safe_facts.model_copy(
+        update={
+            "patient_information": facts.patient_information,
+            "medical_history": facts.medical_history,
+        }
+    )
 
 
 def _build_clinical_facts_user_input(transcript: RoleLabelledTranscript) -> str:
@@ -570,7 +578,17 @@ def _normalize_clinical_facts_payload(data: object) -> dict:
             }
         )
 
-    return {"facts": normalized_facts, "uncertain_items": [str(i) for i in uncertain_items]}
+    patient_information = _first_present(data, ("patient_information", "patient_info"), default={})
+    medical_history = _first_present(data, ("medical_history",), default={})
+    if not isinstance(patient_information, dict) or not isinstance(medical_history, dict):
+        raise ValueError("structured patient fields dict değil")
+
+    return {
+        "facts": normalized_facts,
+        "patient_information": patient_information,
+        "medical_history": medical_history,
+        "uncertain_items": [str(i) for i in uncertain_items],
+    }
 
 
 def _loads_llm_json_object(raw_output: str) -> object:
@@ -616,6 +634,17 @@ def _validate_fact_source_quotes(
             raise ValueError("source_role transcript role ile eşleşmedi")
         if fact.tooth_number_fdi is not None and not _is_valid_fdi(fact.tooth_number_fdi):
             raise ValueError("geçersiz FDI")
+
+    for field in _iter_sourced_patient_fields(facts):
+        matching_utterances = [
+            utterance
+            for utterance in utterance_by_speaker.get(field.source_speaker, [])
+            if field.source_quote and field.source_quote in utterance.text
+        ]
+        if not matching_utterances:
+            raise ValueError("structured field source_quote transkriptte bulunamadı")
+        if not any(utterance.role == field.source_role for utterance in matching_utterances):
+            raise ValueError("structured field source_role eşleşmedi")
 
 
 def _normalize_validated_clinical_facts(
@@ -671,10 +700,47 @@ def _normalize_validated_clinical_facts(
     ):
         uncertain_items.append("Diş numarası net değil: transkriptte numaranın tam okunmadığı belirtilmiş.")
 
-    return ClinicalFactsBundle(
-        session_id=facts.session_id,
-        facts=normalized,
-        uncertain_items=uncertain_items,
+    patient_information = facts.patient_information
+    date_of_birth = patient_information.date_of_birth
+    if date_of_birth is not None and not _quote_contains_explicit_birth_date(date_of_birth.source_quote):
+        patient_information = patient_information.model_copy(update={"date_of_birth": None})
+        uncertain_items.append("Yaş bilgisi doğum tarihine çevrilmedi; açık doğum tarihi belirtilmedi.")
+
+    medical_updates = {}
+    for name in ("chronic_illness", "regular_medication", "drug_allergy", "contagious_disease"):
+        field = getattr(facts.medical_history, name)
+        if field is not None and field.source_role != DentistRole.PATIENT:
+            medical_updates[name] = None
+            uncertain_items.append(f"{name} için hasta tarafından verilmiş açık cevap bulunmadı.")
+
+    return facts.model_copy(
+        update={
+            "facts": normalized,
+            "patient_information": patient_information,
+            "medical_history": facts.medical_history.model_copy(update=medical_updates),
+            "uncertain_items": uncertain_items,
+        }
+    )
+
+
+def _iter_sourced_patient_fields(facts: ClinicalFactsBundle):
+    for field in facts.patient_information.model_dump().keys():
+        value = getattr(facts.patient_information, field)
+        if value is not None:
+            yield value
+    for field in facts.medical_history.model_dump().keys():
+        value = getattr(facts.medical_history, field)
+        if value is not None:
+            yield value
+
+
+def _quote_contains_explicit_birth_date(source_quote: str) -> bool:
+    normalized = source_quote.lower()
+    return bool(
+        re.search(r"\b(?:19|20)\d{2}\b", normalized)
+        or re.search(r"\b\d{1,2}[./-]\d{1,2}[./-](?:19|20)?\d{2}\b", normalized)
+        or "doğum tarihim" in normalized
+        or "dogum tarihim" in normalized
     )
 
 
@@ -882,6 +948,12 @@ def generate_clinical_note(facts: ClinicalFactsBundle, llm: LLMProvider) -> Clin
     kategorize eder/eler.
     """
     safe_facts = _enforce_source_role_invariant(facts)
+    safe_facts = safe_facts.model_copy(
+        update={
+            "patient_information": facts.patient_information,
+            "medical_history": facts.medical_history,
+        }
+    )
 
     system_prompt = load_system_prompt(CLINICAL_NOTE_PROMPT_FILE)
     user_input = _build_clinical_note_user_input(safe_facts)
@@ -889,7 +961,7 @@ def generate_clinical_note(facts: ClinicalFactsBundle, llm: LLMProvider) -> Clin
     try:
         raw_output = llm.complete(system_prompt, user_input)
         note = _normalize_clinical_note_payload(
-            safe_facts.session_id,
+            safe_facts,
             _loads_llm_json_object(raw_output),
         )
         _validate_note_against_facts(safe_facts, note)
@@ -924,6 +996,8 @@ def _deterministic_clinical_note_from_facts(facts: ClinicalFactsBundle) -> Clini
 
     return ClinicalNoteDraft(
         session_id=facts.session_id,
+        patient_information=facts.patient_information,
+        medical_history=facts.medical_history,
         uncertain_items=list(facts.uncertain_items),
         **sections,
     )
@@ -964,12 +1038,14 @@ def _build_clinical_note_user_input(facts: ClinicalFactsBundle) -> str:
     return "Clinical facts bundle:\n" + facts.model_dump_json(exclude_none=False)
 
 
-def _normalize_clinical_note_payload(session_id: str, data: object) -> ClinicalNoteDraft:
+def _normalize_clinical_note_payload(facts: ClinicalFactsBundle, data: object) -> ClinicalNoteDraft:
     if not isinstance(data, dict):
         raise ValueError("clinical note payload dict değil")
 
     payload = {
-        "session_id": session_id,
+        "session_id": facts.session_id,
+        "patient_information": facts.patient_information,
+        "medical_history": facts.medical_history,
         "patient_complaint": _first_present(data, ("patient_complaint",), default=[]),
         "history": _first_present(data, ("history",), default=[]),
         "clinical_findings": _first_present(data, ("clinical_findings",), default=[]),
@@ -990,6 +1066,8 @@ def _validate_note_against_facts(facts: ClinicalFactsBundle, note: ClinicalNoteD
         raise ValueError("note is_draft=false olamaz")
     if note.uncertain_items != facts.uncertain_items:
         raise ValueError("uncertain_items birebir taşınmadı")
+    if note.patient_information != facts.patient_information or note.medical_history != facts.medical_history:
+        raise ValueError("hasta bilgileri/tıbbi özgeçmiş birebir taşınmadı")
 
     expected_by_section: dict[str, list[tuple[str, DentistRole, str]]] = {
         section: [] for section in _CATEGORY_TO_NOTE_SECTION.values()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Literal, Optional
 
 from sqlalchemy import or_, select
@@ -83,6 +84,13 @@ class SessionRepository:
         clinic_id: str,
         display_name: Optional[str] = None,
         external_id: Optional[str] = None,
+        national_id: Optional[str] = None,
+        date_of_birth: Optional[date] = None,
+        occupation: Optional[str] = None,
+        address: Optional[str] = None,
+        phone: Optional[str] = None,
+        email: Optional[str] = None,
+        referred_by: Optional[str] = None,
     ) -> Patient:
         self.ensure_clinic(clinic_id)
         if external_id:
@@ -99,6 +107,13 @@ class SessionRepository:
             clinic_id=clinic_id,
             display_name=display_name,
             external_id=external_id,
+            national_id=national_id,
+            date_of_birth=date_of_birth,
+            occupation=occupation,
+            address=address,
+            phone=phone,
+            email=email,
+            referred_by=referred_by,
         )
         self.db.add(record)
         self.db.flush()
@@ -515,6 +530,13 @@ class SessionRepository:
             "initials": patient.initials,
             "display_name": patient.display_name,
             "external_id": patient.external_id,
+            "national_id": patient.national_id,
+            "date_of_birth": patient.date_of_birth.isoformat() if patient.date_of_birth else None,
+            "occupation": patient.occupation,
+            "address": patient.address,
+            "phone": patient.phone,
+            "email": patient.email,
+            "referred_by": patient.referred_by,
             "created_at": patient.created_at.isoformat(),
             "sessions": [self._session_summary(session) for session in sessions],
         }
@@ -530,6 +552,13 @@ class SessionRepository:
             "initials": patient.initials,
             "display_name": patient.display_name,
             "external_id": patient.external_id,
+            "national_id": patient.national_id,
+            "date_of_birth": patient.date_of_birth.isoformat() if patient.date_of_birth else None,
+            "occupation": patient.occupation,
+            "address": patient.address,
+            "phone": patient.phone,
+            "email": patient.email,
+            "referred_by": patient.referred_by,
             "created_at": patient.created_at.isoformat(),
             "last_session_at": latest.started_at.isoformat() if latest is not None else None,
             "session_count": len(sessions),

@@ -8,6 +8,7 @@ import { ApprovedExport } from "@/components/review/ApprovedExport";
 import { CodeSuggestionsPanel } from "@/components/review/CodeSuggestionsPanel";
 import { DentalChartPanel } from "@/components/review/DentalChartPanel";
 import { NoteDocument } from "@/components/review/NoteDocument";
+import { PatientRecordPanel, type MedicalHistory, type PatientInformation } from "@/components/review/PatientRecordPanel";
 import { PerioChartPanel, type PerioSessionResult } from "@/components/review/PerioChartPanel";
 import { TranscriptDrawer } from "@/components/review/TranscriptDrawer";
 import { TranscriptInput } from "@/components/review/TranscriptInput";
@@ -18,6 +19,7 @@ import { DraftBadge } from "@/components/ui/draft-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { fetchPatientSessions } from "@/lib/patients-api";
+import { parsePatientRecordEditCommand } from "@/lib/patient-record-edit";
 
 type Role = "dentist" | "patient" | "assistant_or_other" | "unknown";
 type SpeakerStatus = "clear" | "review_needed" | "unresolved";
@@ -67,6 +69,8 @@ type NoteSentence = {
 };
 
 type ClinicalNote = {
+  patient_information: PatientInformation;
+  medical_history: MedicalHistory;
   patient_complaint: NoteSentence[];
   history: NoteSentence[];
   clinical_findings: NoteSentence[];
@@ -242,9 +246,14 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [editableNote, setEditableNote] = useState<ClinicalNote | null>(null);
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState("transcript");
+  const [activeReviewArea, setActiveReviewArea] = useState<"clinical" | "patient">("clinical");
   const [sessionType, setSessionType] = useState<"clinical_note" | "perio">("clinical_note");
   const [persistedPerioResult, setPersistedPerioResult] = useState<PerioSessionResult | null>(null);
   const [perioExportPayload, setPerioExportPayload] = useState<PerioExportPayload | null>(null);
+  const [perioPatientInformation, setPerioPatientInformation] = useState<PatientInformation>({});
+  const [perioMedicalHistory, setPerioMedicalHistory] = useState<MedicalHistory>({});
+  const [reviewEditCommand, setReviewEditCommand] = useState("");
+  const [reviewEditMessage, setReviewEditMessage] = useState<string | null>(null);
 
   const utterances = useMemo(() => parseTranscript(transcriptText), [transcriptText]);
   const transcriptDiagnostics = useMemo(() => inspectTranscript(transcriptText), [transcriptText]);
@@ -275,6 +284,10 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
         setSessionType(nextSessionType);
         setPatientId(metadata?.patient_id ?? null);
         setPatientName(patient ? displayPatientHeader(patient.initials, patient.external_id) : "Yeni Görüşme");
+        if (patient && nextSessionType === "perio") {
+          const displayName = patient.display_name ?? patient.initials;
+          setPerioPatientInformation(displayName ? { display_name: patientRecordTextField(displayName) } : {});
+        }
         if (metadata?.started_at) setEncounterAt(toDatetimeLocalValue(new Date(metadata.started_at)));
         if (!snapshot) return;
 
@@ -504,6 +517,33 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     });
   }
 
+  function updatePatientField(field: keyof PatientInformation, value: string) {
+    if (isPerioSession) {
+      setPerioPatientInformation((current) => ({ ...current, [field]: value.trim() ? manualTextField(value) : null }));
+      return;
+    }
+    setEditableNote((current) => current ? ({ ...current, patient_information: { ...current.patient_information, [field]: value.trim() ? manualTextField(value) : null } }) : current);
+  }
+
+  function updateMedicalHistory(field: keyof MedicalHistory, value: boolean | null, detail: string) {
+    if (isPerioSession) {
+      setPerioMedicalHistory((current) => ({ ...current, [field]: value === null && !detail.trim() ? null : manualMedicalField(value, detail) }));
+      return;
+    }
+    setEditableNote((current) => current ? ({ ...current, medical_history: { ...current.medical_history, [field]: value === null && !detail.trim() ? null : manualMedicalField(value, detail) } }) : current);
+  }
+
+  function applyReviewEditCommand() {
+    const correction = parsePatientRecordEditCommand(reviewEditCommand.trim());
+    if (!correction) {
+      setReviewEditMessage("Bu komut güvenle bir hasta kaydı alanına eşleştirilemedi. Alanı Hasta Kaydı ekranından düzenleyin.");
+      return;
+    }
+    updatePatientField(correction.field, correction.value);
+    setReviewEditCommand("");
+    setReviewEditMessage(`${correction.label} hasta kaydında güncellendi.`);
+  }
+
   async function copyExportToClipboard() {
     if (!exportPayload) return;
     const text = formatExportPayload(exportPayload);
@@ -544,6 +584,8 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   const hasDentalChart = procedures.some((procedure) => procedure.procedure.tooth_number_fdi);
   const hasCodeSuggestions = procedures.some((procedure) => procedure.candidates.length);
   const isPerioSession = sessionType === "perio";
+  const patientInformation = isPerioSession ? perioPatientInformation : displayedNote?.patient_information ?? {};
+  const medicalHistory = isPerioSession ? perioMedicalHistory : displayedNote?.medical_history ?? {};
   const defaultTab = isPerioSession ? "perio" : hasAnalysisDraft && displayedNote ? "note" : hasDentalChart ? "chart" : hasCodeSuggestions ? "codes" : "transcript";
   useEffect(() => {
     setActiveWorkspaceTab(defaultTab);
@@ -584,6 +626,13 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
             </div>
           ) : null}
 
+          <Tabs value={activeReviewArea} onValueChange={(value) => setActiveReviewArea(value as "clinical" | "patient")} className="gap-5">
+            <TabsList className="grid h-auto w-full max-w-xl grid-cols-2 rounded-xl bg-muted p-1.5">
+              <TabsTrigger value="clinical" className="h-11 rounded-lg px-5 text-base font-semibold">Klinik Değerlendirme</TabsTrigger>
+              <TabsTrigger value="patient" className="h-11 rounded-lg px-5 text-base font-semibold">Hasta Kaydı</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="clinical">
           <Tabs value={activeWorkspaceTab} onValueChange={setActiveWorkspaceTab} className="gap-4">
             <TabsList className="w-full justify-start overflow-x-auto">
               <TabsTrigger value="note">Klinik Not</TabsTrigger>
@@ -600,6 +649,23 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
                 onSentenceChange={updateNoteSentence}
                 onSourceRoleChange={(speakerId, role) => void patchSpeakerRole(speakerId, role)}
               />
+              <Card className="mt-4 border-border bg-card shadow-card">
+                <CardHeader>
+                  <CardTitle className="text-base">Notu Düzenle</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <Textarea
+                    value={reviewEditCommand}
+                    onChange={(event) => setReviewEditCommand(event.target.value)}
+                    placeholder="Örn: Mesleği mühendis, öğretmen değil."
+                    aria-label="Review düzeltme komutu"
+                  />
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Button type="button" onClick={applyReviewEditCommand} disabled={!reviewEditCommand.trim()}>Uygula</Button>
+                    {reviewEditMessage ? <p className="text-sm text-muted-foreground">{reviewEditMessage}</p> : null}
+                  </div>
+                </CardContent>
+              </Card>
             </TabsContent>
             {hasDentalChart ? (
               <TabsContent value="chart">
@@ -631,6 +697,16 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
               </TabsContent>
             ) : null}
           </Tabs>
+            </TabsContent>
+            <TabsContent value="patient">
+              <PatientRecordPanel
+                patientInformation={patientInformation}
+                medicalHistory={medicalHistory}
+                onPatientFieldChange={updatePatientField}
+                onMedicalHistoryChange={updateMedicalHistory}
+              />
+            </TabsContent>
+          </Tabs>
 
             {error ? (
             <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive">
@@ -645,13 +721,29 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
   if (isPerioSession) {
     return (
       <main className="min-h-[calc(100vh-4rem)] bg-background p-4 md:p-6">
-        <div className="mx-auto max-w-7xl">
-          <PerioChartPanel
-            sessionId={sessionId}
-            apiBase={API_BASE}
-            authHeaders={AUTH_HEADERS}
-            initialResult={persistedPerioResult}
-          />
+        <div className="mx-auto max-w-7xl space-y-5">
+          <Tabs value={activeReviewArea} onValueChange={(value) => setActiveReviewArea(value as "clinical" | "patient")} className="gap-5">
+            <TabsList className="grid h-auto w-full max-w-xl grid-cols-2 rounded-xl bg-muted p-1.5">
+              <TabsTrigger value="clinical" className="h-11 rounded-lg px-5 text-base font-semibold">Klinik Değerlendirme</TabsTrigger>
+              <TabsTrigger value="patient" className="h-11 rounded-lg px-5 text-base font-semibold">Hasta Kaydı</TabsTrigger>
+            </TabsList>
+            <TabsContent value="clinical">
+              <PerioChartPanel
+                sessionId={sessionId}
+                apiBase={API_BASE}
+                authHeaders={AUTH_HEADERS}
+                initialResult={persistedPerioResult}
+              />
+            </TabsContent>
+            <TabsContent value="patient">
+              <PatientRecordPanel
+                patientInformation={patientInformation}
+                medicalHistory={medicalHistory}
+                onPatientFieldChange={updatePatientField}
+                onMedicalHistoryChange={updateMedicalHistory}
+              />
+            </TabsContent>
+          </Tabs>
         </div>
       </main>
     );
@@ -809,6 +901,24 @@ function noteLineFromSentence(sentence: NoteSentence): NoteSectionLine {
     source_speaker: sentence.source_speaker,
     source_role_confidence: sentence.source_role_confidence,
   };
+}
+
+function manualTextField(value: string) {
+  return { value, source_quote: "Hekim tarafından manuel eklendi", source_role: "dentist" as const, source_speaker: "manual", is_uncertain: false };
+}
+
+function patientRecordTextField(value: string) {
+  return {
+    value,
+    source_quote: "Mevcut hasta kaydı",
+    source_role: "unknown" as const,
+    source_speaker: "record",
+    is_uncertain: false,
+  };
+}
+
+function manualMedicalField(value: boolean | null, detail: string) {
+  return { value, detail: detail.trim() || null, source_quote: "Hekim tarafından manuel eklendi", source_role: "dentist" as const, source_speaker: "manual", is_uncertain: false };
 }
 
 function sampleForSpeaker(speakerId: string, utterances: TranscriptUtterance[]) {
