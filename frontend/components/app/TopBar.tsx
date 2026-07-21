@@ -12,7 +12,7 @@ export function TopBar() {
     <header className="sticky top-0 z-30 border-b bg-card/90 backdrop-blur">
       <div className="flex min-h-16 flex-wrap items-center justify-between gap-3 px-4 py-3 md:px-6">
         <div>
-          <p className="text-xs font-medium text-muted-foreground">Tandela TR</p>
+          <p className="text-xs font-medium text-muted-foreground">Klinia TR</p>
           <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
         </div>
         <Link
@@ -32,5 +32,5 @@ function routeTitle(pathname: string) {
   if (pathname.startsWith("/patients/")) return "Hasta Detayı";
   if (pathname === "/session/new") return "Yeni Görüşme";
   if (pathname.startsWith("/session/")) return "Review Workspace";
-  return "Tandela";
+  return "Klinia";
 }

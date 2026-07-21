@@ -39,7 +39,7 @@ PROTECTED_DEMO_EXTERNAL_IDS = ("DEMO-001", "DEMO-002")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Clean unlinked and known test-prefix Tandela sessions.")
+    parser = argparse.ArgumentParser(description="Clean unlinked and known test-prefix Klinia sessions.")
     parser.add_argument(
         "--prefix",
         action="append",

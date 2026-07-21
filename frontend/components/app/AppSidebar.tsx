@@ -16,7 +16,7 @@ export function AppSidebar() {
   return (
     <aside className="hidden w-56 border-r bg-card px-3 py-4 md:block">
       <div className="px-2 pb-5">
-        <p className="text-base font-semibold">Tandela</p>
+        <p className="text-base font-semibold">Klinia</p>
         <p className="text-xs text-muted-foreground">Voice clinical notes</p>
       </div>
       <nav className="space-y-1">

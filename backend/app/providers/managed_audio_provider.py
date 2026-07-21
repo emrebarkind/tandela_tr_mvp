@@ -1,7 +1,7 @@
 """Managed ASR/diarization adapter iskeleti.
 
 Bu adapter vendor-specific değildir; production provider seçildiğinde beklenen
-minimum HTTP sözleşmesini ve Tandela'nın normalize transcript formatını kurar.
+minimum HTTP sözleşmesini ve Klinia'nın normalize transcript formatını kurar.
 Gerçek vendor endpoint'i bu sözleşmeye ince bir mapping katmanıyla bağlanır.
 """
 
@@ -41,29 +41,29 @@ class ManagedAudioProviderConfig(BaseModel):
 
     @classmethod
     def from_env(cls) -> "ManagedAudioProviderConfig":
-        endpoint_url = os.environ.get("TANDELA_AUDIO_ENDPOINT_URL", "").strip()
-        api_key = os.environ.get("TANDELA_AUDIO_API_KEY", "").strip()
-        region = os.environ.get("TANDELA_AUDIO_REGION", "eu").strip().lower()
-        timeout_raw = os.environ.get("TANDELA_AUDIO_TIMEOUT_SEC", "120").strip()
+        endpoint_url = os.environ.get("KLINIA_AUDIO_ENDPOINT_URL", "").strip()
+        api_key = os.environ.get("KLINIA_AUDIO_API_KEY", "").strip()
+        region = os.environ.get("KLINIA_AUDIO_REGION", "eu").strip().lower()
+        timeout_raw = os.environ.get("KLINIA_AUDIO_TIMEOUT_SEC", "120").strip()
 
         missing = []
         if not endpoint_url:
-            missing.append("TANDELA_AUDIO_ENDPOINT_URL")
+            missing.append("KLINIA_AUDIO_ENDPOINT_URL")
         if not api_key:
-            missing.append("TANDELA_AUDIO_API_KEY")
+            missing.append("KLINIA_AUDIO_API_KEY")
         if missing:
             raise AudioProviderConfigurationError(
                 "Managed audio provider eksik env: " + ", ".join(missing)
             )
         if region not in _ALLOWED_REGIONS:
             raise AudioProviderConfigurationError(
-                "TANDELA_AUDIO_REGION AB/Türkiye uyumlu bir değer olmalı."
+                "KLINIA_AUDIO_REGION AB/Türkiye uyumlu bir değer olmalı."
             )
 
         try:
             timeout_sec = float(timeout_raw)
         except ValueError as exc:
-            raise AudioProviderConfigurationError("TANDELA_AUDIO_TIMEOUT_SEC sayısal olmalı.") from exc
+            raise AudioProviderConfigurationError("KLINIA_AUDIO_TIMEOUT_SEC sayısal olmalı.") from exc
 
         return cls(
             endpoint_url=endpoint_url,
@@ -94,7 +94,7 @@ class ManagedAudioResponseIn(BaseModel):
 
 
 class ManagedHttpAudioProcessingProvider(AudioProcessingProvider):
-    """Tek HTTP çağrısını Tandela'nın üç aşamalı provider arabirimine uyarlar."""
+    """Tek HTTP çağrısını Klinia'nın üç aşamalı provider arabirimine uyarlar."""
 
     def __init__(
         self,
@@ -154,7 +154,7 @@ class ManagedHttpAudioProcessingProvider(AudioProcessingProvider):
 
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
-            "X-Tandela-Region": self.config.region,
+            "X-Klinia-Region": self.config.region,
         }
         data = {
             "session_id": audio.session_id,
@@ -189,7 +189,7 @@ def normalize_managed_audio_response(
     expected_session_id: str,
     payload: dict[str, Any],
 ) -> SpeakerLabelledTranscript:
-    """Provider JSON'unu Tandela'nın speaker-labelled transcript tipine çevirir."""
+    """Provider JSON'unu Klinia'nın speaker-labelled transcript tipine çevirir."""
 
     try:
         parsed = ManagedAudioResponseIn.model_validate(payload)

@@ -1,6 +1,6 @@
 # Perio araştırma notları
 
-Bu dosya, Tandela Perio dikte şeması için referans niteliğindedir. Klinik
+Bu dosya, Klinia Perio dikte şeması için referans niteliğindedir. Klinik
 uygulama veya tanı protokolü değildir; ürün veri sözleşmesi hazırlanırken
 kaynak ve kavram kontrolü için saklanır.
 

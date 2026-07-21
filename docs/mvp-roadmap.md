@@ -1,4 +1,4 @@
-# Tandela TR MVP roadmap
+# Klinia TR MVP roadmap
 
 Bu dosya projenin ürün/MVP ilerleme planıdır. `AGENTS.md` güvenlik kuralları
 ve `docs/product-lines.md` ürün tanımları bu dosyaya göre uygulanır.

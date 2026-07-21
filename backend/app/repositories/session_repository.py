@@ -49,7 +49,7 @@ class SessionRepository:
                 id=user_id,
                 clinic_id=clinic_id,
                 role=role,
-                email=email or f"{user_id}@local.tandela",
+                email=email or f"{user_id}@local.klinia",
                 password_hash="",
             )
             self.db.add(record)

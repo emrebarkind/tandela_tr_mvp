@@ -146,7 +146,7 @@ def create_audio_processing_provider(provider_name: Optional[str] = None) -> Aud
 
     if provider_name is None:
         _load_env_file(_ENV_FILE)
-    selected = (provider_name or os.environ.get("TANDELA_AUDIO_PROVIDER") or "not_configured").strip().lower()
+    selected = (provider_name or os.environ.get("KLINIA_AUDIO_PROVIDER") or "not_configured").strip().lower()
     if selected in {"not_configured", "none", "disabled"}:
         return NotConfiguredAudioProcessingProvider()
     if selected in {"dev_fixture", "fixture", "dev"}:
@@ -163,7 +163,7 @@ def create_audio_processing_provider(provider_name: Optional[str] = None) -> Aud
         from app.providers.deepgram_audio_provider import DeepgramAudioProcessingProvider
 
         return DeepgramAudioProcessingProvider()
-    raise AudioProviderConfigurationError(f"Unsupported TANDELA_AUDIO_PROVIDER: {selected}")
+    raise AudioProviderConfigurationError(f"Unsupported KLINIA_AUDIO_PROVIDER: {selected}")
 
 
 def _fixture_utterances(session_id: str) -> list[Utterance]:

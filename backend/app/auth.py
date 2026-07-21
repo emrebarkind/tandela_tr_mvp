@@ -93,7 +93,7 @@ def _secret_key() -> str:
     secret = os.environ.get("SECRET_KEY", "").strip()
     if secret:
         return secret
-    if os.environ.get("TANDELA_AUTH_MODE", "dev").strip().lower() == "dev":
+    if os.environ.get("KLINIA_AUTH_MODE", "dev").strip().lower() == "dev":
         return "dev-only-change-me"
     raise AuthError("SECRET_KEY tanımlı değil.")
 

@@ -1,4 +1,4 @@
-# Tandela TR product lines
+# Klinia TR product lines
 
 Bu dosya ürün kapsamı için kaynak dokümandır. Uygulama yeni ürün üretmez;
 aşağıdaki tanımlı iki ürün hattını geliştirir.
@@ -7,7 +7,7 @@ aşağıdaki tanımlı iki ürün hattını geliştirir.
 
 ### Amaç
 
-Hekim hasta ile her zamanki gibi konuşur. Tandela arka planda görüşmeyi kaydeder,
+Hekim hasta ile her zamanki gibi konuşur. Klinia arka planda görüşmeyi kaydeder,
 hekim/hasta/asistan konuşmacılarını ayırır ve hekim incelemesi için klinik not
 taslağı üretir.
 
@@ -43,7 +43,7 @@ role gate gerekiyorsa hekim onayı → klinik not/procedure/kod review.
 ### Amaç
 
 Hekim periodontal muayene sırasında probla ilerlerken değerleri sesli dikte eder.
-Tandela cep derinliklerini ve perio işaretlerini diş/bölge bazlı periodontal chart
+Klinia cep derinliklerini ve perio işaretlerini diş/bölge bazlı periodontal chart
 taslağına dönüştürür.
 
 ### Çıktılar

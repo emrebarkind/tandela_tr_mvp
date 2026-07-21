@@ -79,9 +79,9 @@ function FallbackToothAnimation() {
   return (
     <div className="grid place-items-center">
       <div className="relative grid size-28 place-items-center rounded-full border border-ring/25 bg-card/70 shadow-card">
-        <span className="tandela-pulse-ring absolute inset-0 rounded-full border border-ring/30" aria-hidden="true" />
+        <span className="klinia-pulse-ring absolute inset-0 rounded-full border border-ring/30" aria-hidden="true" />
         <svg
-          className="tandela-slow-rotate relative size-14 text-primary"
+          className="klinia-slow-rotate relative size-14 text-primary"
           viewBox="0 0 64 64"
           fill="none"
           aria-hidden="true"
@@ -104,7 +104,7 @@ function FallbackToothAnimation() {
       </div>
       <svg className="mt-6 h-10 w-44 text-primary" viewBox="0 0 176 40" role="img" aria-label="Analiz ilerliyor">
         <path
-          className="tandela-wave-line"
+          className="klinia-wave-line"
           d="M2 20 C18 8, 30 8, 46 20 S74 32, 90 20 S118 8, 134 20 S160 32, 174 20"
           fill="none"
           stroke="currentColor"

@@ -1,4 +1,4 @@
-# AGENTS.md — Tandela TR (AI Dental Documentation Assistant)
+# AGENTS.md — Klinia TR (AI Dental Documentation Assistant)
 
 > Bu dosya projenin **gerçeğin tek kaynağıdır**. Codex her oturumda okur.
 > Buradaki güvenlik kuralları (§4) pazarlık konusu değildir; hiçbir görev bunları

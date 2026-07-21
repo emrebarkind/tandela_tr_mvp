@@ -1,4 +1,4 @@
-# CLAUDE.md — Tandela TR (AI Dental Documentation Assistant)
+# CLAUDE.md — Klinia TR (AI Dental Documentation Assistant)
 
 > Bu dosya projenin **gerçeğin tek kaynağıdır**. Claude Code her oturumda okur.
 > Buradaki güvenlik kuralları (§4) pazarlık konusu değildir; hiçbir görev bunları

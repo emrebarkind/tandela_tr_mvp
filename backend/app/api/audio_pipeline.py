@@ -101,7 +101,7 @@ def process_uploaded_audio(
     response: Optional[AudioProcessResponse] = None
 
     try:
-        with tempfile.NamedTemporaryFile(prefix=f"tandela_{session_id}_", suffix=suffix, delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(prefix=f"klinia_{session_id}_", suffix=suffix, delete=False) as tmp:
             temp_path = tmp.name
             shutil.copyfileobj(upload.file, tmp)
 

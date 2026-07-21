@@ -16,7 +16,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Tandela Review",
+  title: "Klinia Review",
   description: "Dental documentation review workspace",
 };
 

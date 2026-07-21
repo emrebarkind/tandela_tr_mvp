@@ -39,7 +39,7 @@ textarea:focus-visible {
   background: rgba(74, 124, 99, 0.22);
 }
 
-@keyframes tandela-pulse-ring {
+@keyframes klinia-pulse-ring {
   0% {
     opacity: 0.46;
     transform: scale(0.92);
@@ -50,11 +50,11 @@ textarea:focus-visible {
   }
 }
 
-.tandela-pulse-ring {
-  animation: tandela-pulse-ring 1.8s ease-out infinite;
+.klinia-pulse-ring {
+  animation: klinia-pulse-ring 1.8s ease-out infinite;
 }
 
-@keyframes tandela-slow-rotate {
+@keyframes klinia-slow-rotate {
   0% {
     transform: rotate(-3deg);
   }
@@ -66,7 +66,7 @@ textarea:focus-visible {
   }
 }
 
-@keyframes tandela-wave-line {
+@keyframes klinia-wave-line {
   0%,
   100% {
     opacity: 0.42;
@@ -78,14 +78,14 @@ textarea:focus-visible {
   }
 }
 
-.tandela-slow-rotate {
-  animation: tandela-slow-rotate 2.8s ease-in-out infinite;
+.klinia-slow-rotate {
+  animation: klinia-slow-rotate 2.8s ease-in-out infinite;
   transform-origin: center;
 }
 
-.tandela-wave-line {
+.klinia-wave-line {
   stroke-dasharray: 18 10;
-  animation: tandela-wave-line 2.2s ease-in-out infinite;
+  animation: klinia-wave-line 2.2s ease-in-out infinite;
 }
 
 @layer utilities {

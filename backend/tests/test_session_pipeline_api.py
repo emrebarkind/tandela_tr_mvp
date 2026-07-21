@@ -58,9 +58,9 @@ from app.providers.llm import LLMProvider
 
 
 AUTH_HEADERS = {
-    "X-Tandela-Clinic-Id": "clinic-test",
-    "X-Tandela-User-Id": "doctor-header",
-    "X-Tandela-User-Role": "dentist",
+    "X-Klinia-Clinic-Id": "clinic-test",
+    "X-Klinia-User-Id": "doctor-header",
+    "X-Klinia-User-Role": "dentist",
 }
 
 
@@ -973,7 +973,7 @@ class SessionPipelineApiTests(unittest.TestCase):
     def test_audio_process_route_deletes_raw_audio_when_provider_not_configured(self) -> None:
         client = TestClient(app)
 
-        with patch.dict("os.environ", {"TANDELA_AUDIO_PROVIDER": "not_configured"}):
+        with patch.dict("os.environ", {"KLINIA_AUDIO_PROVIDER": "not_configured"}):
             response = client.post(
                 "/sessions/audio/process",
                 data={"session_id": "audio-skeleton"},
@@ -989,7 +989,7 @@ class SessionPipelineApiTests(unittest.TestCase):
     def test_audio_process_route_returns_fixture_transcript_for_dev_provider(self) -> None:
         client = TestClient(app)
 
-        with patch.dict("os.environ", {"TANDELA_AUDIO_PROVIDER": "dev_fixture"}):
+        with patch.dict("os.environ", {"KLINIA_AUDIO_PROVIDER": "dev_fixture"}):
             response = client.post(
                 "/sessions/audio/process",
                 data={"session_id": "audio-dev-fixture"},
@@ -1007,7 +1007,7 @@ class SessionPipelineApiTests(unittest.TestCase):
     def test_audio_job_route_returns_status_and_result_for_dev_provider(self) -> None:
         client = TestClient(app)
 
-        with patch.dict("os.environ", {"TANDELA_AUDIO_PROVIDER": "dev_fixture"}):
+        with patch.dict("os.environ", {"KLINIA_AUDIO_PROVIDER": "dev_fixture"}):
             response = client.post(
                 "/sessions/audio/jobs",
                 data={"session_id": "audio-job-fixture"},
@@ -1059,7 +1059,7 @@ class SessionPipelineApiTests(unittest.TestCase):
         )
         client = TestClient(app)
 
-        with patch.dict("os.environ", {"TANDELA_AUDIO_PROVIDER": "dev_fixture"}):
+        with patch.dict("os.environ", {"KLINIA_AUDIO_PROVIDER": "dev_fixture"}):
             response = client.post(
                 "/sessions/audio-phase-c/audio",
                 headers=AUTH_HEADERS,
@@ -1127,7 +1127,7 @@ class SessionPipelineApiTests(unittest.TestCase):
     def test_required_auth_mode_rejects_missing_headers(self) -> None:
         client = TestClient(app)
 
-        with patch.dict("os.environ", {"TANDELA_AUTH_MODE": "required"}):
+        with patch.dict("os.environ", {"KLINIA_AUTH_MODE": "required"}):
             response = client.get("/sessions/audio/jobs/missing-job")
 
         self.assertEqual(response.status_code, 401)
@@ -1135,7 +1135,7 @@ class SessionPipelineApiTests(unittest.TestCase):
     def test_login_returns_jwt_and_sessions_accept_bearer_token(self) -> None:
         class StubRepository:
             def find_user_by_email(self, email):  # noqa: ANN001, ANN201
-                if email != "dentist@test.tandela":
+                if email != "dentist@test.klinia":
                     return None
                 return SimpleNamespace(
                     id="doctor-jwt",
@@ -1147,10 +1147,10 @@ class SessionPipelineApiTests(unittest.TestCase):
         app.dependency_overrides[get_session_repository] = lambda: StubRepository()
         client = TestClient(app)
 
-        with patch.dict("os.environ", {"TANDELA_AUTH_MODE": "jwt", "SECRET_KEY": "test-secret"}):
+        with patch.dict("os.environ", {"KLINIA_AUTH_MODE": "jwt", "SECRET_KEY": "test-secret"}):
             login = client.post(
                 "/auth/login",
-                json={"email": "dentist@test.tandela", "password": "secret-pass"},
+                json={"email": "dentist@test.klinia", "password": "secret-pass"},
             )
             self.assertEqual(login.status_code, 200)
             token = login.json()["access_token"]
@@ -1163,7 +1163,7 @@ class SessionPipelineApiTests(unittest.TestCase):
         self.assertEqual(authed.status_code, 404)
 
     def test_audio_provider_factory_defaults_to_safe_not_configured_provider(self) -> None:
-        with patch.dict("os.environ", {"TANDELA_AUDIO_PROVIDER": "not_configured"}):
+        with patch.dict("os.environ", {"KLINIA_AUDIO_PROVIDER": "not_configured"}):
             provider = create_audio_processing_provider()
 
         self.assertIsInstance(provider, NotConfiguredAudioProcessingProvider)
@@ -1177,9 +1177,9 @@ class SessionPipelineApiTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
-                "TANDELA_AUDIO_ENDPOINT_URL": "https://audio.example.invalid/process",
-                "TANDELA_AUDIO_API_KEY": "test-key",
-                "TANDELA_AUDIO_REGION": "eu",
+                "KLINIA_AUDIO_ENDPOINT_URL": "https://audio.example.invalid/process",
+                "KLINIA_AUDIO_API_KEY": "test-key",
+                "KLINIA_AUDIO_REGION": "eu",
             },
             clear=True,
         ):
@@ -1227,9 +1227,9 @@ class SessionPipelineApiTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
-                "TANDELA_AUDIO_ENDPOINT_URL": "https://audio.example.invalid/process",
-                "TANDELA_AUDIO_API_KEY": "test-key",
-                "TANDELA_AUDIO_REGION": "us",
+                "KLINIA_AUDIO_ENDPOINT_URL": "https://audio.example.invalid/process",
+                "KLINIA_AUDIO_API_KEY": "test-key",
+                "KLINIA_AUDIO_REGION": "us",
             },
             clear=True,
         ):

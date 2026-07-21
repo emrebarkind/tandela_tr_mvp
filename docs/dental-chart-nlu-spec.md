@@ -2,7 +2,7 @@
 
 Bu spec, dental chart taslağı için konuşmadan yapılandırılmış diş bulgusu çıkarma
 kurallarını tanımlar. Aural reposundaki dental NLU yaklaşımı referans alınmıştır;
-mimari, runtime veya veri akışı taşınmamıştır. Tandela TR için hedef stack:
+mimari, runtime veya veri akışı taşınmamıştır. Klinia TR için hedef stack:
 FastAPI pipeline + Gemini LLM provider + mevcut REVIEW GATE ve §4 güvenlik
 kurallarıdır.
 

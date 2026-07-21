@@ -1,4 +1,4 @@
-# Tandela TR data model
+# Klinia TR data model
 
 Current MVP persistence layer uses SQLAlchemy models under `backend/app/models/`.
 Production target is PostgreSQL via `DATABASE_URL`; local development can use

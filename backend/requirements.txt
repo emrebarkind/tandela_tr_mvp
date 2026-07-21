@@ -1,4 +1,4 @@
-# Tandela TR — backend bağımlılıkları (CLAUDE.md §2: FastAPI/Python).
+# Klinia TR — backend bağımlılıkları (CLAUDE.md §2: FastAPI/Python).
 #
 # Not: bu görevde sadece şu ana kadar gerçekten kullanılan paketler listelenir;
 # FastAPI/SQLAlchemy/Celery/Redis henüz kod tarafında somut olarak

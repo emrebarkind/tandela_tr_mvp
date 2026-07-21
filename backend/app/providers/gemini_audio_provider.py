@@ -1,6 +1,6 @@
 """Gemini-backed audio transcription/diarization provider for demo MVP.
 
-Bu provider gerçek ses dosyasını modele gönderir ve Tandela'nın
+Bu provider gerçek ses dosyasını modele gönderir ve Klinia'nın
 speaker-labelled transcript formatına normalize eder. Demo hedefi içindir:
 ayrı bir ASR/diarization vendor key'i olmadan mevcut GEMINI_API_KEY ile
 ses→transcript→analiz akışını gerçek kayda bağlar.

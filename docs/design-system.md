@@ -1,4 +1,4 @@
-# Tandela Design System
+# Klinia Design System
 
 ## Temel tokenlar
 

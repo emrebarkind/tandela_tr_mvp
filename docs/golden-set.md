@@ -1,4 +1,4 @@
-# Golden Set — Tandela TR
+# Golden Set — Klinia TR
 
 > Beynin (role_assignment, facts_extraction, note_generation) gerçek LLM'e
 > bağlandığında doğruluğunu ölçmek için referans set. Her senaryoda bilinçli

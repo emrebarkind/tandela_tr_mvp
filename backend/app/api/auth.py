@@ -19,11 +19,11 @@ class AuthContext(BaseModel):
 
 def get_auth_context(
     authorization: Optional[str] = Header(default=None),
-    x_tandela_clinic_id: Optional[str] = Header(default=None),
-    x_tandela_user_id: Optional[str] = Header(default=None),
-    x_tandela_user_role: Optional[str] = Header(default=None),
+    x_klinia_clinic_id: Optional[str] = Header(default=None),
+    x_klinia_user_id: Optional[str] = Header(default=None),
+    x_klinia_user_role: Optional[str] = Header(default=None),
 ) -> AuthContext:
-    mode = os.environ.get("TANDELA_AUTH_MODE", "dev").strip().lower()
+    mode = os.environ.get("KLINIA_AUTH_MODE", "dev").strip().lower()
     if authorization:
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer" or not token:
@@ -38,9 +38,9 @@ def get_auth_context(
             role=str(payload.get("role") or "dentist"),
         )
 
-    clinic_id = (x_tandela_clinic_id or "").strip()
-    user_id = (x_tandela_user_id or "").strip()
-    role = (x_tandela_user_role or "dentist").strip() or "dentist"
+    clinic_id = (x_klinia_clinic_id or "").strip()
+    user_id = (x_klinia_user_id or "").strip()
+    role = (x_klinia_user_role or "dentist").strip() or "dentist"
 
     if mode in ("required", "jwt") and (not clinic_id or not user_id):
         raise HTTPException(status_code=401, detail="JWT Bearer token gerekli.")

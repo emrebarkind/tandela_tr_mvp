@@ -16,10 +16,10 @@ set -a
 source "$ENV_FILE"
 set +a
 
-export TANDELA_AUDIO_PROVIDER="${TANDELA_AUDIO_PROVIDER:-gemini_audio}"
+export KLINIA_AUDIO_PROVIDER="${KLINIA_AUDIO_PROVIDER:-gemini_audio}"
 export NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8000}"
 
-if [[ "$TANDELA_AUDIO_PROVIDER" == "gemini_audio" && -z "${GEMINI_API_KEY:-}" ]]; then
+if [[ "$KLINIA_AUDIO_PROVIDER" == "gemini_audio" && -z "${GEMINI_API_KEY:-}" ]]; then
   echo "GEMINI_API_KEY yok. Gerçek ASR/analiz demosu için backend/.env içine ekleyin."
   exit 1
 fi

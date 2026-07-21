@@ -1,4 +1,4 @@
-"""SQLAlchemy persistence models for Tandela MVP sessions."""
+"""SQLAlchemy persistence models for Klinia MVP sessions."""
 
 from __future__ import annotations
 

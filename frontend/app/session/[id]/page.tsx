@@ -221,9 +221,9 @@ type NoteSectionLine = {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 const AUTH_HEADERS = {
-  "X-Tandela-Clinic-Id": process.env.NEXT_PUBLIC_TANDELA_CLINIC_ID ?? "dev-clinic",
-  "X-Tandela-User-Id": process.env.NEXT_PUBLIC_TANDELA_USER_ID ?? "frontend-doctor",
-  "X-Tandela-User-Role": process.env.NEXT_PUBLIC_TANDELA_USER_ROLE ?? "dentist",
+  "X-Klinia-Clinic-Id": process.env.NEXT_PUBLIC_KLINIA_CLINIC_ID ?? "dev-clinic",
+  "X-Klinia-User-Id": process.env.NEXT_PUBLIC_KLINIA_USER_ID ?? "frontend-doctor",
+  "X-Klinia-User-Role": process.env.NEXT_PUBLIC_KLINIA_USER_ROLE ?? "dentist",
 };
 
 const transcriptLinePattern = /^([A-Za-zÇĞİÖŞÜçğıöşü0-9_-]+)\s*:\s*(.+)$/;
@@ -557,7 +557,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${exportPayload.session_id}-tandela-export.txt`;
+    link.download = `${exportPayload.session_id}-klinia-export.txt`;
     link.click();
     URL.revokeObjectURL(url);
     setExportMessage("TXT dosyası indirildi.");
@@ -575,7 +575,7 @@ export default function ReviewPage({ params }: { params: { id: string } }) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${perioExportPayload.session_id}-tandela-perio-export.txt`;
+    link.download = `${perioExportPayload.session_id}-klinia-perio-export.txt`;
     link.click();
     URL.revokeObjectURL(url);
     setExportMessage("Perio TXT dosyası indirildi.");

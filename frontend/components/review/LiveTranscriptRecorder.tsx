@@ -245,7 +245,7 @@ export function LiveTranscriptRecorder({
   return (
     <>
       <div className="relative mx-auto mb-6 flex size-28 items-center justify-center">
-        {isRecording ? <div className="tandela-pulse-ring absolute inset-0 rounded-full border border-ring" /> : null}
+        {isRecording ? <div className="klinia-pulse-ring absolute inset-0 rounded-full border border-ring" /> : null}
         <button
           className="relative z-10 flex size-24 items-center justify-center rounded-full border border-ring bg-card text-primary shadow-card transition-colors hover:bg-background active:bg-secondary"
           type="button"

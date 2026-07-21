@@ -13,7 +13,7 @@ export function middleware(request: NextRequest) {
 
   return new NextResponse("Kimlik doğrulama gerekli.", {
     status: 401,
-    headers: { "WWW-Authenticate": 'Basic realm="Tandela Preview"' },
+    headers: { "WWW-Authenticate": 'Basic realm="Klinia Preview"' },
   });
 }
 

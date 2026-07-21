@@ -15,10 +15,10 @@ from app.models.session_records import Clinic, User
 
 def main() -> int:
     clinic_id = os.environ.get("SEED_CLINIC_ID", "test-clinic")
-    clinic_name = os.environ.get("SEED_CLINIC_NAME", "Tandela Test Kliniği")
+    clinic_name = os.environ.get("SEED_CLINIC_NAME", "Klinia Test Kliniği")
     user_id = os.environ.get("SEED_USER_ID", "test-dentist")
-    email = os.environ.get("SEED_EMAIL", "dentist@test.tandela")
-    password = os.environ.get("SEED_PASSWORD", "tandela-demo-123")
+    email = os.environ.get("SEED_EMAIL", "dentist@test.klinia")
+    password = os.environ.get("SEED_PASSWORD", "klinia-demo-123")
 
     init_database(engine)
     db = SessionLocal()
